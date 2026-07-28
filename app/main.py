@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from gmssl import func, sm3
@@ -19,6 +19,11 @@ from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
+ENVIRONMENT = os.getenv("ERP_ENV", "development").lower()
+SESSION_COOKIE = "sm_erp_session"
+SESSION_TTL_SECONDS = int(os.getenv("ERP_SESSION_TTL_SECONDS", "28800"))
+LOGIN_MAX_FAILURES = int(os.getenv("ERP_LOGIN_MAX_FAILURES", "5"))
+LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
 
 app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
 
@@ -37,6 +42,10 @@ def db():
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def timestamp() -> int:
+    return int(datetime.now(UTC).timestamp())
 
 
 def sm3_hex(data: bytes) -> str:
@@ -64,20 +73,28 @@ def password_matches(password: str, stored: str) -> bool:
     return secrets.compare_digest(legacy, digest)
 
 
-def sm4_key() -> bytes:
-    key = bytes.fromhex(os.getenv("ERP_SM4_KEY_HEX", "00112233445566778899aabbccddeeff"))
+def master_key() -> bytes:
+    key_hex = os.getenv("ERP_SM4_KEY_HEX")
+    if not key_hex:
+        raise RuntimeError("必须配置 ERP_SM4_KEY_HEX")
+    key = bytes.fromhex(key_hex)
     if len(key) != 16:
         raise RuntimeError("ERP_SM4_KEY_HEX 必须是 16 字节的十六进制密钥")
     return key
 
 
+def derive_key(label: str) -> bytes:
+    """从主密钥派生用途隔离的国密子密钥，避免加密和完整性复用同一密钥。"""
+    return bytes.fromhex(sm3_hex(master_key() + label.encode()))[:16]
+
+
 def encrypt_sensitive(value: str) -> str:
     """SM4-CBC 加密并追加 SM3 MAC，供审计详情等敏感字段使用。"""
-    key, iv = sm4_key(), secrets.token_bytes(16)
+    encryption_key, mac_key, iv = derive_key("sm4-encryption"), derive_key("sm3-audit-mac"), secrets.token_bytes(16)
     cipher = CryptSM4()
-    cipher.set_key(key, SM4_ENCRYPT)
+    cipher.set_key(encryption_key, SM4_ENCRYPT)
     ciphertext = cipher.crypt_cbc(iv, value.encode())
-    mac = sm3_hex(key + iv + ciphertext)
+    mac = sm3_hex(mac_key + iv + ciphertext)
     return f"sm4${iv.hex()}${ciphertext.hex()}${mac}"
 
 
@@ -85,11 +102,11 @@ def decrypt_sensitive(value: str) -> str:
     if not value.startswith("sm4$"):
         return value
     _, iv_hex, cipher_hex, mac = value.split("$", 3)
-    key, iv, ciphertext = sm4_key(), bytes.fromhex(iv_hex), bytes.fromhex(cipher_hex)
-    if not secrets.compare_digest(sm3_hex(key + iv + ciphertext), mac):
+    encryption_key, mac_key, iv, ciphertext = derive_key("sm4-encryption"), derive_key("sm3-audit-mac"), bytes.fromhex(iv_hex), bytes.fromhex(cipher_hex)
+    if not secrets.compare_digest(sm3_hex(mac_key + iv + ciphertext), mac):
         raise ValueError("审计详情完整性校验失败")
     cipher = CryptSM4()
-    cipher.set_key(key, SM4_DECRYPT)
+    cipher.set_key(encryption_key, SM4_DECRYPT)
     return cipher.crypt_cbc(iv, ciphertext).decode()
 
 
@@ -102,10 +119,16 @@ def initialize() -> None:
           department TEXT NOT NULL, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_attempts (username TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, locked_until INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
         """)
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('engineering','研发部',NULL)")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('finance','财务部',NULL)")
-        conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin',?,'系统管理员','engineering','admin',1,?)", (password_hash(os.getenv("ERP_BOOTSTRAP_PASSWORD", "admin")), now()))
+        bootstrap_password = os.getenv("ERP_BOOTSTRAP_PASSWORD")
+        if not bootstrap_password:
+            raise RuntimeError("必须配置 ERP_BOOTSTRAP_PASSWORD")
+        conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin',?,'系统管理员','engineering','admin',1,?)", (password_hash(bootstrap_password), now()))
         # 明文演示口令可启动时迁移；scrypt 口令将在首次成功登录时迁移，避免丢失校验能力。
         legacy = conn.execute("SELECT password FROM employees WHERE id='admin'").fetchone()
         if legacy and not legacy["password"].startswith(("sm3$", "scrypt$")):
@@ -135,11 +158,14 @@ class DepartmentInput(BaseModel):
     name: str = Field(min_length=2, max_length=80)
 
 
-def actor(x_user_id: str | None) -> sqlite3.Row:
-    if not x_user_id:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请提供 X-User-Id")
+def actor(session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> sqlite3.Row:
+    if not session_token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录会话已失效")
+    token_hash = sm3_hex(session_token.encode())
     with db() as conn:
-        row = conn.execute("SELECT * FROM employees WHERE id=? AND active=1", (x_user_id,)).fetchone()
+        conn.execute("DELETE FROM sessions WHERE expires_at<?", (timestamp(),))
+        row = conn.execute("""SELECT e.* FROM sessions s JOIN employees e ON e.id=s.employee_id
+                            WHERE s.token_hash=? AND s.expires_at>? AND e.active=1""", (token_hash, timestamp())).fetchone()
     if not row:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在或已停用")
     return row
@@ -160,20 +186,42 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginInput) -> dict[str, str]:
+def login(payload: LoginInput, response: Response) -> dict[str, str]:
     with db() as conn:
+        attempt = conn.execute("SELECT * FROM login_attempts WHERE username=?", (payload.username,)).fetchone()
+        if attempt and attempt["locked_until"] > timestamp():
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "账号已临时锁定，请稍后重试")
         row = conn.execute("SELECT * FROM employees WHERE username=? AND active=1", (payload.username,)).fetchone()
         if not row or not password_matches(payload.password, row["password"]):
+            failures = (attempt["failures"] if attempt else 0) + 1
+            locked_until = timestamp() + LOGIN_LOCK_SECONDS if failures >= LOGIN_MAX_FAILURES else 0
+            conn.execute("""INSERT INTO login_attempts VALUES (?,?,?) ON CONFLICT(username)
+                         DO UPDATE SET failures=excluded.failures,locked_until=excluded.locked_until""", (payload.username, failures, locked_until))
+            audit(conn, "system", "auth.login_failed", f"username={payload.username}")
+            # 认证失败会抛出 HTTPException；此处显式提交以保留锁定计数。
+            conn.commit()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
         if not row["password"].startswith("sm3$"):
             conn.execute("UPDATE employees SET password=? WHERE id=?", (password_hash(payload.password), row["id"]))
+        conn.execute("DELETE FROM login_attempts WHERE username=?", (payload.username,))
+        session_token = secrets.token_urlsafe(48)
+        conn.execute("INSERT INTO sessions VALUES (?,?,?,?)", (sm3_hex(session_token.encode()), row["id"], timestamp() + SESSION_TTL_SECONDS, now()))
         audit(conn, row["id"], "auth.login")
+    response.set_cookie(SESSION_COOKIE, session_token, max_age=SESSION_TTL_SECONDS, httponly=True, secure=ENVIRONMENT == "production", samesite="strict", path="/")
     return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
 
 
+@app.post("/api/auth/logout")
+def logout(response: Response, session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, str]:
+    if session_token:
+        with db() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash=?", (sm3_hex(session_token.encode()),))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"message": "已退出登录"}
+
+
 @app.get("/api/employees")
-def employees(x_user_id: str | None = Header(default=None)) -> list[dict[str, object]]:
-    current = actor(x_user_id)
+def employees(current: sqlite3.Row = Depends(actor)) -> list[dict[str, object]]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     with db() as conn:
@@ -182,8 +230,7 @@ def employees(x_user_id: str | None = Header(default=None)) -> list[dict[str, ob
 
 
 @app.post("/api/employees", status_code=status.HTTP_201_CREATED)
-def create_employee(payload: EmployeeInput, x_user_id: str | None = Header(default=None)) -> dict[str, str]:
-    current = actor(x_user_id)
+def create_employee(payload: EmployeeInput, current: sqlite3.Row = Depends(actor)) -> dict[str, str]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     employee_id = str(uuid4())
@@ -199,8 +246,7 @@ def create_employee(payload: EmployeeInput, x_user_id: str | None = Header(defau
 
 
 @app.patch("/api/employees/{employee_id}/status")
-def update_employee_status(employee_id: str, active: bool, x_user_id: str | None = Header(default=None)) -> dict[str, str]:
-    current = actor(x_user_id)
+def update_employee_status(employee_id: str, active: bool, current: sqlite3.Row = Depends(actor)) -> dict[str, str]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     if employee_id == current["id"] and not active:
@@ -213,16 +259,14 @@ def update_employee_status(employee_id: str, active: bool, x_user_id: str | None
 
 
 @app.get("/api/departments")
-def departments(x_user_id: str | None = Header(default=None)) -> list[dict[str, object]]:
-    actor(x_user_id)
+def departments(current: sqlite3.Row = Depends(actor)) -> list[dict[str, object]]:
     with db() as conn:
         rows = conn.execute("SELECT d.*,COUNT(e.id) employee_count FROM departments d LEFT JOIN employees e ON e.department=d.id AND e.active=1 GROUP BY d.id ORDER BY d.name").fetchall()
     return [dict(row) for row in rows]
 
 
 @app.post("/api/departments", status_code=status.HTTP_201_CREATED)
-def create_department(payload: DepartmentInput, x_user_id: str | None = Header(default=None)) -> dict[str, str]:
-    current = actor(x_user_id)
+def create_department(payload: DepartmentInput, current: sqlite3.Row = Depends(actor)) -> dict[str, str]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     with db() as conn:
@@ -235,8 +279,7 @@ def create_department(payload: DepartmentInput, x_user_id: str | None = Header(d
 
 
 @app.get("/api/audit-logs")
-def audit_logs(x_user_id: str | None = Header(default=None)) -> list[dict[str, object]]:
-    current = actor(x_user_id)
+def audit_logs(current: sqlite3.Row = Depends(actor)) -> list[dict[str, object]]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     with db() as conn:
@@ -253,8 +296,7 @@ def audit_logs(x_user_id: str | None = Header(default=None)) -> list[dict[str, o
 
 
 @app.get("/api/dashboard")
-def dashboard_data(x_user_id: str | None = Header(default=None)) -> dict[str, object]:
-    current = actor(x_user_id)
+def dashboard_data(current: sqlite3.Row = Depends(actor)) -> dict[str, object]:
     with db() as conn:
         employee_count = conn.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0]
         department_count = conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0]

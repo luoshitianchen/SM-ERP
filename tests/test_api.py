@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 
 os.environ["ERP_DATABASE_PATH"] = str(Path(__file__).parent / "test.db")
+os.environ["ERP_SM4_KEY_HEX"] = "00112233445566778899aabbccddeeff"
+os.environ["ERP_BOOTSTRAP_PASSWORD"] = "admin"
 
 from fastapi.testclient import TestClient
 from app.main import app
@@ -12,9 +14,34 @@ def test_admin_can_manage_organization_and_people():
     with TestClient(app) as client:
         login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
         assert login.status_code == 200
-        headers = {"X-User-Id": "admin"}
-        assert client.post("/api/departments", headers=headers, json={"id": "operations", "name": "运营部"}).status_code == 201
-        employee = client.post("/api/employees", headers=headers, json={"username": "operator", "password": "secure123", "name": "运营同事", "department": "operations", "role": "manager"})
+        client.cookies.clear()
+        assert client.get("/api/employees", headers={"X-User-Id": "admin"}).status_code == 401
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).status_code == 200
+        assert client.post("/api/departments", json={"id": "operations", "name": "运营部"}).status_code == 201
+        employee = client.post("/api/employees", json={"username": "operator", "password": "secure123", "name": "运营同事", "department": "operations", "role": "manager"})
         assert employee.status_code == 201
-        assert client.patch(f"/api/employees/{employee.json()['id']}/status?active=false", headers=headers).status_code == 200
-        assert client.get("/api/audit-logs", headers=headers).status_code == 200
+        assert client.patch(f"/api/employees/{employee.json()['id']}/status?active=false").status_code == 200
+        assert client.get("/api/audit-logs").status_code == 200
+        assert client.post("/api/auth/logout").status_code == 200
+        assert client.get("/api/employees").status_code == 401
+
+
+def test_login_lockout_after_failed_attempts(monkeypatch):
+    Path(os.environ["ERP_DATABASE_PATH"]).unlink(missing_ok=True)
+    from app import main
+    monkeypatch.setattr(main, "LOGIN_MAX_FAILURES", 2)
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).status_code == 429
+
+
+def test_sm4_key_is_required(monkeypatch):
+    from app.main import master_key
+    monkeypatch.delenv("ERP_SM4_KEY_HEX")
+    try:
+        master_key()
+    except RuntimeError as exc:
+        assert "ERP_SM4_KEY_HEX" in str(exc)
+    else:
+        raise AssertionError("missing SM4 key must fail")
