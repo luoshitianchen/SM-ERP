@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import hashlib
+import secrets
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +18,7 @@ DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
 
-app = FastAPI(title="SM ERP", version="0.1.0", description="企业资源与身份管理系统")
+app = FastAPI(title="SM ERP", version="1.0.0", description="企业资源与身份管理系统")
 
 
 @contextmanager
@@ -35,6 +37,19 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def password_hash(password: str, salt: str | None = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
+    return f"scrypt${salt}${digest}"
+
+
+def password_matches(password: str, stored: str) -> bool:
+    if not stored.startswith("scrypt$"):
+        return secrets.compare_digest(password, stored)
+    _, salt, digest = stored.split("$", 2)
+    return secrets.compare_digest(password_hash(password, salt).split("$", 2)[2], digest)
+
+
 def initialize() -> None:
     with db() as conn:
         conn.executescript("""
@@ -47,7 +62,11 @@ def initialize() -> None:
         """)
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('engineering','研发部',NULL)")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('finance','财务部',NULL)")
-        conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin','admin','系统管理员','engineering','admin',1,?)", (now(),))
+        conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin',?,'系统管理员','engineering','admin',1,?)", (password_hash(os.getenv("ERP_BOOTSTRAP_PASSWORD", "admin")), now()))
+        # 兼容旧数据库中的演示明文密码，首次升级后立即改为 scrypt 哈希。
+        legacy = conn.execute("SELECT password FROM employees WHERE id='admin'").fetchone()
+        if legacy and not legacy["password"].startswith("scrypt$"):
+            conn.execute("UPDATE employees SET password=? WHERE id='admin'", (password_hash(legacy["password"]),))
 
 
 @app.on_event("startup")
@@ -66,6 +85,11 @@ class EmployeeInput(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     department: str = Field(min_length=1, max_length=80)
     role: Role = "employee"
+
+
+class DepartmentInput(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9_-]{2,64}$")
+    name: str = Field(min_length=2, max_length=80)
 
 
 def actor(x_user_id: str | None) -> sqlite3.Row:
@@ -95,8 +119,8 @@ def health() -> dict[str, str]:
 @app.post("/api/auth/login")
 def login(payload: LoginInput) -> dict[str, str]:
     with db() as conn:
-        row = conn.execute("SELECT * FROM employees WHERE username=? AND password=? AND active=1", (payload.username, payload.password)).fetchone()
-        if not row:
+        row = conn.execute("SELECT * FROM employees WHERE username=? AND active=1", (payload.username,)).fetchone()
+        if not row or not password_matches(payload.password, row["password"]):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
         audit(conn, row["id"], "auth.login")
     return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
@@ -120,11 +144,59 @@ def create_employee(payload: EmployeeInput, x_user_id: str | None = Header(defau
     employee_id = str(uuid4())
     with db() as conn:
         try:
-            conn.execute("INSERT INTO employees VALUES (?,?,?,?,?,?,1,?)", (employee_id, payload.username, payload.password, payload.name, payload.department, payload.role, now()))
+            if not conn.execute("SELECT 1 FROM departments WHERE id=?", (payload.department,)).fetchone():
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "部门不存在")
+            conn.execute("INSERT INTO employees VALUES (?,?,?,?,?,?,1,?)", (employee_id, payload.username, password_hash(payload.password), payload.name, payload.department, payload.role, now()))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "ERP 账号已存在") from exc
         audit(conn, current["id"], "employee.created", payload.username)
     return {"id": employee_id, "message": "员工已创建"}
+
+
+@app.patch("/api/employees/{employee_id}/status")
+def update_employee_status(employee_id: str, active: bool, x_user_id: str | None = Header(default=None)) -> dict[str, str]:
+    current = actor(x_user_id)
+    if current["role"] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+    if employee_id == current["id"] and not active:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "不能停用当前管理员账号")
+    with db() as conn:
+        if conn.execute("UPDATE employees SET active=? WHERE id=?", (int(active), employee_id)).rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "员工不存在")
+        audit(conn, current["id"], "employee.status_changed", f"employee={employee_id} active={active}")
+    return {"message": "员工状态已更新"}
+
+
+@app.get("/api/departments")
+def departments(x_user_id: str | None = Header(default=None)) -> list[dict[str, object]]:
+    actor(x_user_id)
+    with db() as conn:
+        rows = conn.execute("SELECT d.*,COUNT(e.id) employee_count FROM departments d LEFT JOIN employees e ON e.department=d.id AND e.active=1 GROUP BY d.id ORDER BY d.name").fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/departments", status_code=status.HTTP_201_CREATED)
+def create_department(payload: DepartmentInput, x_user_id: str | None = Header(default=None)) -> dict[str, str]:
+    current = actor(x_user_id)
+    if current["role"] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+    with db() as conn:
+        try:
+            conn.execute("INSERT INTO departments VALUES (?,?,NULL)", (payload.id, payload.name))
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "部门 ID 或名称已存在") from exc
+        audit(conn, current["id"], "department.created", payload.id)
+    return {"id": payload.id, "message": "部门已创建"}
+
+
+@app.get("/api/audit-logs")
+def audit_logs(x_user_id: str | None = Header(default=None)) -> list[dict[str, object]]:
+    current = actor(x_user_id)
+    if current["role"] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100").fetchall()
+    return [dict(row) for row in rows]
 
 
 @app.get("/api/dashboard")
