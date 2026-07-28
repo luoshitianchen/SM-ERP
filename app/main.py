@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from gmssl import func, sm3
@@ -145,6 +145,13 @@ class LoginInput(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+def integration_key() -> str:
+    key = os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
+    if not key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "知识库集成密钥尚未配置")
+    return key
+
+
 class EmployeeInput(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=6, max_length=256)
@@ -208,6 +215,21 @@ def login(payload: LoginInput, response: Response) -> dict[str, str]:
         conn.execute("INSERT INTO sessions VALUES (?,?,?,?)", (sm3_hex(session_token.encode()), row["id"], timestamp() + SESSION_TTL_SECONDS, now()))
         audit(conn, row["id"], "auth.login")
     response.set_cookie(SESSION_COOKIE, session_token, max_age=SESSION_TTL_SECONDS, httponly=True, secure=ENVIRONMENT == "production", samesite="strict", path="/")
+    return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
+
+
+@app.post("/api/integrations/knowledge-bot/auth")
+def knowledge_bot_auth(payload: LoginInput, x_integration_key: str | None = Header(default=None)) -> dict[str, str]:
+    """供知识库后端调用的受密钥保护身份验证接口，不创建浏览器会话。"""
+    if not x_integration_key or not secrets.compare_digest(x_integration_key, integration_key()):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "集成密钥无效")
+    with db() as conn:
+        row = conn.execute("SELECT * FROM employees WHERE username=? AND active=1", (payload.username,)).fetchone()
+        if not row or not password_matches(payload.password, row["password"]):
+            audit(conn, "system", "integration.login_failed", f"username={payload.username}")
+            conn.commit()
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
+        audit(conn, row["id"], "integration.knowledge_bot_authenticated")
     return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
 
 
