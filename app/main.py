@@ -13,12 +13,14 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from gmssl import func, sm3
+from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
 
-app = FastAPI(title="SM ERP", version="1.0.0", description="企业资源与身份管理系统")
+app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
 
 
 @contextmanager
@@ -37,17 +39,58 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def password_hash(password: str, salt: str | None = None) -> str:
+def sm3_hex(data: bytes) -> str:
+    return sm3.sm3_hash(func.bytes_to_list(data))
+
+
+def password_hash(password: str, salt: str | None = None, rounds: int | None = None) -> str:
+    """SM3 迭代盐化口令派生，避免存储明文或可逆口令。"""
+    rounds = rounds or int(os.getenv("ERP_SM3_PASSWORD_ROUNDS", "10000"))
     salt = salt or secrets.token_hex(16)
-    digest = hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
-    return f"scrypt${salt}${digest}"
+    digest = sm3_hex((salt + password).encode())
+    for _ in range(rounds - 1):
+        digest = sm3_hex((salt + digest).encode())
+    return f"sm3${rounds}${salt}${digest}"
 
 
 def password_matches(password: str, stored: str) -> bool:
+    if stored.startswith("sm3$"):
+        _, rounds, salt, digest = stored.split("$", 3)
+        return secrets.compare_digest(password_hash(password, salt, int(rounds)).split("$", 3)[3], digest)
     if not stored.startswith("scrypt$"):
         return secrets.compare_digest(password, stored)
     _, salt, digest = stored.split("$", 2)
-    return secrets.compare_digest(password_hash(password, salt).split("$", 2)[2], digest)
+    legacy = hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
+    return secrets.compare_digest(legacy, digest)
+
+
+def sm4_key() -> bytes:
+    key = bytes.fromhex(os.getenv("ERP_SM4_KEY_HEX", "00112233445566778899aabbccddeeff"))
+    if len(key) != 16:
+        raise RuntimeError("ERP_SM4_KEY_HEX 必须是 16 字节的十六进制密钥")
+    return key
+
+
+def encrypt_sensitive(value: str) -> str:
+    """SM4-CBC 加密并追加 SM3 MAC，供审计详情等敏感字段使用。"""
+    key, iv = sm4_key(), secrets.token_bytes(16)
+    cipher = CryptSM4()
+    cipher.set_key(key, SM4_ENCRYPT)
+    ciphertext = cipher.crypt_cbc(iv, value.encode())
+    mac = sm3_hex(key + iv + ciphertext)
+    return f"sm4${iv.hex()}${ciphertext.hex()}${mac}"
+
+
+def decrypt_sensitive(value: str) -> str:
+    if not value.startswith("sm4$"):
+        return value
+    _, iv_hex, cipher_hex, mac = value.split("$", 3)
+    key, iv, ciphertext = sm4_key(), bytes.fromhex(iv_hex), bytes.fromhex(cipher_hex)
+    if not secrets.compare_digest(sm3_hex(key + iv + ciphertext), mac):
+        raise ValueError("审计详情完整性校验失败")
+    cipher = CryptSM4()
+    cipher.set_key(key, SM4_DECRYPT)
+    return cipher.crypt_cbc(iv, ciphertext).decode()
 
 
 def initialize() -> None:
@@ -63,9 +106,9 @@ def initialize() -> None:
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('engineering','研发部',NULL)")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('finance','财务部',NULL)")
         conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin',?,'系统管理员','engineering','admin',1,?)", (password_hash(os.getenv("ERP_BOOTSTRAP_PASSWORD", "admin")), now()))
-        # 兼容旧数据库中的演示明文密码，首次升级后立即改为 scrypt 哈希。
+        # 明文演示口令可启动时迁移；scrypt 口令将在首次成功登录时迁移，避免丢失校验能力。
         legacy = conn.execute("SELECT password FROM employees WHERE id='admin'").fetchone()
-        if legacy and not legacy["password"].startswith("scrypt$"):
+        if legacy and not legacy["password"].startswith(("sm3$", "scrypt$")):
             conn.execute("UPDATE employees SET password=? WHERE id='admin'", (password_hash(legacy["password"]),))
 
 
@@ -103,7 +146,7 @@ def actor(x_user_id: str | None) -> sqlite3.Row:
 
 
 def audit(conn: sqlite3.Connection, actor_id: str, action: str, detail: str = "") -> None:
-    conn.execute("INSERT INTO audit_logs VALUES (?,?,?,?,?)", (str(uuid4()), actor_id, action, detail, now()))
+    conn.execute("INSERT INTO audit_logs VALUES (?,?,?,?,?)", (str(uuid4()), actor_id, action, encrypt_sensitive(detail), now()))
 
 
 @app.get("/", include_in_schema=False)
@@ -122,6 +165,8 @@ def login(payload: LoginInput) -> dict[str, str]:
         row = conn.execute("SELECT * FROM employees WHERE username=? AND active=1", (payload.username,)).fetchone()
         if not row or not password_matches(payload.password, row["password"]):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
+        if not row["password"].startswith("sm3$"):
+            conn.execute("UPDATE employees SET password=? WHERE id=?", (password_hash(payload.password), row["id"]))
         audit(conn, row["id"], "auth.login")
     return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
 
@@ -196,7 +241,15 @@ def audit_logs(x_user_id: str | None = Header(default=None)) -> list[dict[str, o
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     with db() as conn:
         rows = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100").fetchall()
-    return [dict(row) for row in rows]
+    logs = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["detail"] = decrypt_sensitive(item["detail"])
+        except ValueError:
+            item["detail"] = "[完整性校验失败]"
+        logs.append(item)
+    return logs
 
 
 @app.get("/api/dashboard")
