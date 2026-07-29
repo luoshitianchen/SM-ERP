@@ -36,3 +36,10 @@ uvicorn app.main:app --reload --port 8100
 - 账号口令使用 SM3 迭代盐化派生，不保存明文；
 - 审计详情使用 SM4-CBC 加密，并以 SM3 完整性校验保护；
 - 在 `.env` 配置 `ERP_SM4_KEY_HEX`，缺失密钥或管理员初始化密码时系统会拒绝启动；生产环境应由 KMS/HSM 或部署平台的密钥管理能力注入。
+
+## 生产部署清单
+
+1. 复制 `.env.example` 为 `.env`，填入 KMS/HSM 提供的 SM4 密钥、强管理员密码和集成密钥。
+2. 将 `ERP_ENV` 保持为 `production`，生产启动会拒绝示例密钥与示例初始化密码。
+3. 使用反向代理提供 HTTPS，并设置受信任代理来源；应用容器默认以非 root 用户运行。
+4. 执行 `docker compose up --build -d`，通过 `/health` 监控实例状态。

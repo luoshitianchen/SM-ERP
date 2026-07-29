@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from gmssl import func, sm3
@@ -24,6 +24,9 @@ SESSION_COOKIE = "sm_erp_session"
 SESSION_TTL_SECONDS = int(os.getenv("ERP_SESSION_TTL_SECONDS", "28800"))
 LOGIN_MAX_FAILURES = int(os.getenv("ERP_LOGIN_MAX_FAILURES", "5"))
 LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
+LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("ERP_LOGIN_RATE_WINDOW_SECONDS", "60"))
+LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
+login_rate_window: dict[str, tuple[int, int]] = {}
 
 app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
 
@@ -135,9 +138,30 @@ def initialize() -> None:
             conn.execute("UPDATE employees SET password=? WHERE id='admin'", (password_hash(legacy["password"]),))
 
 
+def validate_runtime_config() -> None:
+    if ENVIRONMENT == "production":
+        master_key()
+        if os.getenv("ERP_BOOTSTRAP_PASSWORD") in {None, "", "CHANGE_ME"}:
+            raise RuntimeError("生产环境必须设置强 ERP_BOOTSTRAP_PASSWORD")
+        if os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY") in {None, "", "REPLACE_WITH_RANDOM_INTEGRATION_KEY"}:
+            raise RuntimeError("生产环境必须设置 ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
+
+
 @app.on_event("startup")
 def startup() -> None:
+    validate_runtime_config()
     initialize()
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
+    return response
 
 
 class LoginInput(BaseModel):
@@ -193,7 +217,14 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginInput, response: Response) -> dict[str, str]:
+def login(payload: LoginInput, response: Response, request: Request) -> dict[str, str]:
+    client_ip = request.client.host if request.client else "unknown"
+    window_started, count = login_rate_window.get(client_ip, (timestamp(), 0))
+    if timestamp() - window_started >= LOGIN_RATE_WINDOW_SECONDS:
+        window_started, count = timestamp(), 0
+    if count >= LOGIN_RATE_MAX_REQUESTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "登录请求过于频繁，请稍后重试")
+    login_rate_window[client_ip] = (window_started, count + 1)
     with db() as conn:
         attempt = conn.execute("SELECT * FROM login_attempts WHERE username=?", (payload.username,)).fetchone()
         if attempt and attempt["locked_until"] > timestamp():
