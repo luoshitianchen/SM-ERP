@@ -14,15 +14,18 @@ def test_admin_can_manage_organization_and_people():
     with TestClient(app) as client:
         login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
         assert login.status_code == 200
+        csrf = {"X-CSRF-Token": login.json()["csrf_token"]}
         client.cookies.clear()
         assert client.get("/api/employees", headers={"X-User-Id": "admin"}).status_code == 401
-        assert client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).status_code == 200
-        assert client.post("/api/departments", json={"id": "operations", "name": "运营部"}).status_code == 201
-        employee = client.post("/api/employees", json={"username": "operator", "password": "secure123", "name": "运营同事", "department": "operations", "role": "manager"})
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        csrf = {"X-CSRF-Token": login.json()["csrf_token"]}
+        assert client.post("/api/departments", json={"id": "blocked", "name": "禁止部门"}).status_code == 403
+        assert client.post("/api/departments", headers=csrf, json={"id": "operations", "name": "运营部"}).status_code == 201
+        employee = client.post("/api/employees", headers=csrf, json={"username": "operator", "password": "secure123", "name": "运营同事", "department": "operations", "role": "manager"})
         assert employee.status_code == 201
-        assert client.patch(f"/api/employees/{employee.json()['id']}/status?active=false").status_code == 200
+        assert client.patch(f"/api/employees/{employee.json()['id']}/status?active=false", headers=csrf).status_code == 200
         assert client.get("/api/audit-logs").status_code == 200
-        assert client.post("/api/auth/logout").status_code == 200
+        assert client.post("/api/auth/logout", headers=csrf).status_code == 200
         assert client.get("/api/employees").status_code == 401
 
 

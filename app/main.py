@@ -126,6 +126,9 @@ def initialize() -> None:
         CREATE TABLE IF NOT EXISTS login_attempts (username TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, locked_until INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
         """)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "csrf_hash" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN csrf_hash TEXT")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('engineering','研发部',NULL)")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('finance','财务部',NULL)")
         bootstrap_password = os.getenv("ERP_BOOTSTRAP_PASSWORD")
@@ -155,12 +158,24 @@ def startup() -> None:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
+        token = request.cookies.get(SESSION_COOKIE)
+        csrf_token = request.headers.get("X-CSRF-Token")
+        if not token or not csrf_token:
+            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed")
+        with db() as conn:
+            row = conn.execute("SELECT csrf_hash,expires_at FROM sessions WHERE token_hash=?", (sm3_hex(token.encode()),)).fetchone()
+        if not row or row["expires_at"] <= timestamp() or not secrets.compare_digest(row["csrf_hash"] or "", sm3_hex(csrf_token.encode())):
+            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed")
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    if ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -242,11 +257,11 @@ def login(payload: LoginInput, response: Response, request: Request) -> dict[str
         if not row["password"].startswith("sm3$"):
             conn.execute("UPDATE employees SET password=? WHERE id=?", (password_hash(payload.password), row["id"]))
         conn.execute("DELETE FROM login_attempts WHERE username=?", (payload.username,))
-        session_token = secrets.token_urlsafe(48)
-        conn.execute("INSERT INTO sessions VALUES (?,?,?,?)", (sm3_hex(session_token.encode()), row["id"], timestamp() + SESSION_TTL_SECONDS, now()))
+        session_token, csrf_token = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
+        conn.execute("INSERT INTO sessions (token_hash,employee_id,expires_at,created_at,csrf_hash) VALUES (?,?,?,?,?)", (sm3_hex(session_token.encode()), row["id"], timestamp() + SESSION_TTL_SECONDS, now(), sm3_hex(csrf_token.encode())))
         audit(conn, row["id"], "auth.login")
     response.set_cookie(SESSION_COOKIE, session_token, max_age=SESSION_TTL_SECONDS, httponly=True, secure=ENVIRONMENT == "production", samesite="strict", path="/")
-    return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"]}
+    return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"], "csrf_token": csrf_token}
 
 
 @app.post("/api/integrations/knowledge-bot/auth")
