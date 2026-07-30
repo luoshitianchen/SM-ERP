@@ -30,6 +30,7 @@ LOGIN_MAX_FAILURES = int(os.getenv("ERP_LOGIN_MAX_FAILURES", "5"))
 LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
 LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("ERP_LOGIN_RATE_WINDOW_SECONDS", "60"))
 LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
+MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 login_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 
@@ -177,6 +178,10 @@ async def security_headers(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or str(uuid4())
     request.state.request_id = request_id
     context_token = request_id_context.set(request_id)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_REQUEST_BYTES:
+        request_id_context.reset(context_token)
+        return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content="Request body too large", headers={"X-Request-Id": request_id})
     if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
         session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
@@ -274,6 +279,10 @@ def ready() -> dict[str, str]:
 @app.post("/api/auth/login")
 def login(payload: LoginInput, response: Response, request: Request) -> dict[str, str]:
     client_ip = request.client.host if request.client else "unknown"
+    current_time = timestamp()
+    for ip, (started, _) in list(login_rate_window.items()):
+        if current_time - started >= LOGIN_RATE_WINDOW_SECONDS:
+            login_rate_window.pop(ip, None)
     window_started, count = login_rate_window.get(client_ip, (timestamp(), 0))
     if timestamp() - window_started >= LOGIN_RATE_WINDOW_SECONDS:
         window_started, count = timestamp(), 0

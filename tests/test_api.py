@@ -56,3 +56,12 @@ def test_security_headers_and_request_id():
         assert response.status_code == 200
         assert response.headers["X-Request-Id"] == "audit-trace-1"
         assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_rejects_oversized_request_body(monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "MAX_REQUEST_BYTES", 8)
+    with TestClient(app) as client:
+        response = client.post("/api/auth/login", content="x" * 9, headers={"content-type": "application/json"})
+        assert response.status_code == 413
+        assert response.headers["X-Request-Id"]
