@@ -48,6 +48,8 @@ uvicorn app.main:app --reload --port 8100
 
 Docker 默认仅监听 `127.0.0.1:8100`，不会直接暴露到公网。对外访问应通过企业 VPN、零信任网关或反向代理，并设置 IP 白名单、TLS 与身份认证。生产环境保持 `ERP_ENABLE_DOCS=false`，并将实际域名加入 `ERP_ALLOWED_HOSTS`。
 
+仓库提供 [内网 Nginx + mTLS 示例](deploy/nginx/internal.conf.example)：它同样只监听回环地址，并要求企业 CA 签发的客户端证书。替换示例域名和证书路径后，先通过 `nginx -t` 校验，再由企业网络团队将 VPN/零信任入口转发至该监听地址；不要直接开放应用容器端口或 Nginx 监听端口到公网。
+
 ## 备份与恢复
 
 执行 `./backup.ps1` 可在 `backup/` 目录生成 SQLite 一致性备份。备份目录不纳入 Git；应将备份转存到加密、受访问控制的企业备份存储，并定期进行恢复演练。
