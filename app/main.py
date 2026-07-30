@@ -14,6 +14,7 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from gmssl import func, sm3
@@ -32,7 +33,10 @@ LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
 login_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 
-app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
+docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
+app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None)
+allowed_hosts = [host.strip() for host in os.getenv("ERP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if host.strip()]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 logger = logging.getLogger("sm_erp")
 
@@ -158,6 +162,8 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产环境必须设置强 ERP_BOOTSTRAP_PASSWORD")
         if os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY") in {None, "", "REPLACE_WITH_RANDOM_INTEGRATION_KEY"}:
             raise RuntimeError("生产环境必须设置 ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
+        if any(host in {"*", "0.0.0.0"} for host in allowed_hosts):
+            raise RuntimeError("生产环境 ERP_ALLOWED_HOSTS 不可包含通配主机")
 
 
 @app.on_event("startup")

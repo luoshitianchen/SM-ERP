@@ -2,7 +2,7 @@ services:
   sm-erp:
     build: .
     ports:
-      - "${ERP_PORT:-8100}:8100"
+      - "127.0.0.1:${ERP_PORT:-8100}:8100"
     env_file: .env
     environment:
       ERP_DATABASE_PATH: /app/data/erp.db

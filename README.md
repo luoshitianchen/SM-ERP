@@ -43,3 +43,7 @@ uvicorn app.main:app --reload --port 8100
 2. 将 `ERP_ENV` 保持为 `production`，生产启动会拒绝示例密钥与示例初始化密码。
 3. 使用反向代理提供 HTTPS，并设置受信任代理来源；应用容器默认以非 root 用户运行。
 4. 执行 `docker compose up --build -d`，通过 `/health` 监控实例状态。
+
+## 网络暴露控制
+
+Docker 默认仅监听 `127.0.0.1:8100`，不会直接暴露到公网。对外访问应通过企业 VPN、零信任网关或反向代理，并设置 IP 白名单、TLS 与身份认证。生产环境保持 `ERP_ENABLE_DOCS=false`，并将实际域名加入 `ERP_ALLOWED_HOSTS`。
