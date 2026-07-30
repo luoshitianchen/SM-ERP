@@ -4,6 +4,7 @@ import os
 import sqlite3
 import hashlib
 import secrets
+from contextvars import ContextVar
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
 LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("ERP_LOGIN_RATE_WINDOW_SECONDS", "60"))
 LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
 login_rate_window: dict[str, tuple[int, int]] = {}
+request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 
 app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
 
@@ -36,6 +38,7 @@ def db():
     conn = sqlite3.connect(DATABASE, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
         conn.commit()
@@ -125,10 +128,13 @@ def initialize() -> None:
         CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS login_attempts (username TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, locked_until INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
         """)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         if "csrf_hash" not in columns:
             conn.execute("ALTER TABLE sessions ADD COLUMN csrf_hash TEXT")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('engineering','研发部',NULL)")
         conn.execute("INSERT OR IGNORE INTO departments VALUES ('finance','财务部',NULL)")
         bootstrap_password = os.getenv("ERP_BOOTSTRAP_PASSWORD")
@@ -158,16 +164,23 @@ def startup() -> None:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or str(uuid4())
+    request.state.request_id = request_id
+    context_token = request_id_context.set(request_id)
     if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
-        token = request.cookies.get(SESSION_COOKIE)
+        session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
-        if not token or not csrf_token:
-            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed")
+        if not session_token or not csrf_token:
+            request_id_context.reset(context_token)
+            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed", headers={"X-Request-Id": request_id})
         with db() as conn:
-            row = conn.execute("SELECT csrf_hash,expires_at FROM sessions WHERE token_hash=?", (sm3_hex(token.encode()),)).fetchone()
+            row = conn.execute("SELECT csrf_hash,expires_at FROM sessions WHERE token_hash=?", (sm3_hex(session_token.encode()),)).fetchone()
         if not row or row["expires_at"] <= timestamp() or not secrets.compare_digest(row["csrf_hash"] or "", sm3_hex(csrf_token.encode())):
-            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed")
+            request_id_context.reset(context_token)
+            return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed", headers={"X-Request-Id": request_id})
     response = await call_next(request)
+    request_id_context.reset(context_token)
+    response.headers["X-Request-Id"] = request.state.request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -218,7 +231,8 @@ def actor(session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE)
 
 
 def audit(conn: sqlite3.Connection, actor_id: str, action: str, detail: str = "") -> None:
-    conn.execute("INSERT INTO audit_logs VALUES (?,?,?,?,?)", (str(uuid4()), actor_id, action, encrypt_sensitive(detail), now()))
+    enriched = f"request_id={request_id_context.get()} {detail}".strip()
+    conn.execute("INSERT INTO audit_logs VALUES (?,?,?,?,?)", (str(uuid4()), actor_id, action, encrypt_sensitive(enriched), now()))
 
 
 @app.get("/", include_in_schema=False)
@@ -228,7 +242,12 @@ def dashboard() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": app.version}
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+    except sqlite3.Error as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "数据库不可用") from exc
+    return {"status": "ok", "version": app.version, "database": "ok"}
 
 
 @app.post("/api/auth/login")

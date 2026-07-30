@@ -48,3 +48,11 @@ def test_sm4_key_is_required(monkeypatch):
         assert "ERP_SM4_KEY_HEX" in str(exc)
     else:
         raise AssertionError("missing SM4 key must fail")
+
+
+def test_security_headers_and_request_id():
+    with TestClient(app) as client:
+        response = client.get("/health", headers={"X-Request-Id": "audit-trace-1"})
+        assert response.status_code == 200
+        assert response.headers["X-Request-Id"] == "audit-trace-1"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
