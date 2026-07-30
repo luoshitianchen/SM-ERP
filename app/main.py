@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import hashlib
 import secrets
@@ -33,6 +34,7 @@ LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 login_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
 app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None)
@@ -175,13 +177,20 @@ def startup() -> None:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    request_id = request.headers.get("X-Request-Id") or str(uuid4())
+    supplied_request_id = request.headers.get("X-Request-Id", "")
+    request_id = supplied_request_id if REQUEST_ID_PATTERN.fullmatch(supplied_request_id) else str(uuid4())
     request.state.request_id = request_id
     context_token = request_id_context.set(request_id)
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_REQUEST_BYTES:
-        request_id_context.reset(context_token)
-        return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content="Request body too large", headers={"X-Request-Id": request_id})
+    if content_length:
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            request_id_context.reset(context_token)
+            return Response(status_code=status.HTTP_400_BAD_REQUEST, content="Invalid Content-Length", headers={"X-Request-Id": request_id})
+        if body_size < 0 or body_size > MAX_REQUEST_BYTES:
+            request_id_context.reset(context_token)
+            return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content="Request body too large", headers={"X-Request-Id": request_id})
     if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
         session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
