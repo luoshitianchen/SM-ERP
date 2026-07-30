@@ -3,9 +3,19 @@ services:
     build: .
     ports:
       - "127.0.0.1:${ERP_PORT:-8100}:8100"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       ERP_DATABASE_PATH: /app/data/erp.db
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 100
