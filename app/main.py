@@ -31,8 +31,11 @@ LOGIN_MAX_FAILURES = int(os.getenv("ERP_LOGIN_MAX_FAILURES", "5"))
 LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
 LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("ERP_LOGIN_RATE_WINDOW_SECONDS", "60"))
 LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
+INTEGRATION_RATE_WINDOW_SECONDS = int(os.getenv("ERP_INTEGRATION_RATE_WINDOW_SECONDS", "60"))
+INTEGRATION_RATE_MAX_REQUESTS = int(os.getenv("ERP_INTEGRATION_RATE_MAX_REQUESTS", "60"))
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 login_rate_window: dict[str, tuple[int, int]] = {}
+integration_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -163,7 +166,7 @@ def validate_runtime_config() -> None:
         master_key()
         if os.getenv("ERP_BOOTSTRAP_PASSWORD") in {None, "", "CHANGE_ME"}:
             raise RuntimeError("生产环境必须设置强 ERP_BOOTSTRAP_PASSWORD")
-        if os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY") in {None, "", "REPLACE_WITH_RANDOM_INTEGRATION_KEY"}:
+        if not integration_keys() or any(key.startswith("REPLACE_") for key in integration_keys()):
             raise RuntimeError("生产环境必须设置 ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
         if any(host in {"*", "0.0.0.0"} for host in allowed_hosts):
             raise RuntimeError("生产环境 ERP_ALLOWED_HOSTS 不可包含通配主机")
@@ -222,11 +225,27 @@ class LoginInput(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
-def integration_key() -> str:
-    key = os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
-    if not key:
+def integration_keys() -> tuple[str, ...]:
+    """返回有效集成密钥；逗号分隔的密钥列表支持无停机轮换。"""
+    configured = os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEYS") or os.getenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEY", "")
+    keys = tuple(key.strip() for key in configured.split(",") if key.strip())
+    if not keys:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "知识库集成密钥尚未配置")
-    return key
+    return keys
+
+
+def consume_rate_limit(window: dict[str, tuple[int, int]], client_ip: str, period: int, maximum: int) -> None:
+    """按来源限制认证接口，并及时回收过期条目。"""
+    current_time = timestamp()
+    for ip, (started, _) in list(window.items()):
+        if current_time - started >= period:
+            window.pop(ip, None)
+    window_started, count = window.get(client_ip, (current_time, 0))
+    if current_time - window_started >= period:
+        window_started, count = current_time, 0
+    if count >= maximum:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "认证请求过于频繁，请稍后重试")
+    window[client_ip] = (window_started, count + 1)
 
 
 class EmployeeInput(BaseModel):
@@ -288,16 +307,7 @@ def ready() -> dict[str, str]:
 @app.post("/api/auth/login")
 def login(payload: LoginInput, response: Response, request: Request) -> dict[str, str]:
     client_ip = request.client.host if request.client else "unknown"
-    current_time = timestamp()
-    for ip, (started, _) in list(login_rate_window.items()):
-        if current_time - started >= LOGIN_RATE_WINDOW_SECONDS:
-            login_rate_window.pop(ip, None)
-    window_started, count = login_rate_window.get(client_ip, (timestamp(), 0))
-    if timestamp() - window_started >= LOGIN_RATE_WINDOW_SECONDS:
-        window_started, count = timestamp(), 0
-    if count >= LOGIN_RATE_MAX_REQUESTS:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "登录请求过于频繁，请稍后重试")
-    login_rate_window[client_ip] = (window_started, count + 1)
+    consume_rate_limit(login_rate_window, client_ip, LOGIN_RATE_WINDOW_SECONDS, LOGIN_RATE_MAX_REQUESTS)
     with db() as conn:
         attempt = conn.execute("SELECT * FROM login_attempts WHERE username=?", (payload.username,)).fetchone()
         if attempt and attempt["locked_until"] > timestamp():
@@ -323,9 +333,11 @@ def login(payload: LoginInput, response: Response, request: Request) -> dict[str
 
 
 @app.post("/api/integrations/knowledge-bot/auth")
-def knowledge_bot_auth(payload: LoginInput, x_integration_key: str | None = Header(default=None)) -> dict[str, str]:
+def knowledge_bot_auth(payload: LoginInput, request: Request, x_integration_key: str | None = Header(default=None)) -> dict[str, str]:
     """供知识库后端调用的受密钥保护身份验证接口，不创建浏览器会话。"""
-    if not x_integration_key or not secrets.compare_digest(x_integration_key, integration_key()):
+    client_ip = request.client.host if request.client else "unknown"
+    consume_rate_limit(integration_rate_window, client_ip, INTEGRATION_RATE_WINDOW_SECONDS, INTEGRATION_RATE_MAX_REQUESTS)
+    if not x_integration_key or not any(secrets.compare_digest(x_integration_key, key) for key in integration_keys()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "集成密钥无效")
     with db() as conn:
         row = conn.execute("SELECT * FROM employees WHERE username=? AND active=1", (payload.username,)).fetchone()

@@ -78,3 +78,9 @@ def test_replaces_unsafe_request_id():
         response = client.get("/health", headers={"X-Request-Id": "x" * 65})
         assert response.status_code == 200
         assert response.headers["X-Request-Id"] != "x" * 65
+
+
+def test_integration_key_rotation_accepts_current_and_previous(monkeypatch):
+    from app.main import integration_keys
+    monkeypatch.setenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEYS", "current-key, previous-key")
+    assert integration_keys() == ("current-key", "previous-key")

@@ -23,6 +23,10 @@ uvicorn app.main:app --reload --port 8100
 
 响应包含 `id`、`name`、`department`、`role`。
 
+### 集成密钥轮换
+
+ERP 支持使用 `ERP_KNOWLEDGE_BOT_INTEGRATION_KEYS=新密钥,旧密钥` 进行短期双密钥轮换；知识库先切换到新密钥，确认认证请求稳定后，从 ERP 配置中移除旧密钥。密钥仅由部署平台或 KMS 注入，禁止写入仓库、日志或前端。
+
 ## 管理能力
 
 - scrypt 密码哈希与账号停用；
