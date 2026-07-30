@@ -4,6 +4,8 @@ import os
 import sqlite3
 import hashlib
 import secrets
+import json
+import logging
 from contextvars import ContextVar
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -31,6 +33,8 @@ login_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 
 app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
+logger = logging.getLogger("sm_erp")
 
 
 @contextmanager
@@ -181,6 +185,7 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     request_id_context.reset(context_token)
     response.headers["X-Request-Id"] = request.state.request_id
+    logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code}, ensure_ascii=False))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -248,6 +253,16 @@ def health() -> dict[str, str]:
     except sqlite3.Error as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "数据库不可用") from exc
     return {"status": "ok", "version": app.version, "database": "ok"}
+
+
+@app.get("/readyz")
+def ready() -> dict[str, str]:
+    """编排平台就绪探针：确认数据库和生产密钥配置可用。"""
+    with db() as conn:
+        conn.execute("SELECT 1").fetchone()
+    if ENVIRONMENT == "production":
+        master_key()
+    return {"status": "ready"}
 
 
 @app.post("/api/auth/login")
