@@ -8,7 +8,7 @@ import secrets
 import json
 import logging
 from contextvars import ContextVar
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -39,10 +39,7 @@ integration_rate_window: dict[str, tuple[int, int]] = {}
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
-docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
-app = FastAPI(title="SM ERP", version="1.1.0", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None)
 allowed_hosts = [host.strip() for host in os.getenv("ERP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if host.strip()]
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 logger = logging.getLogger("sm_erp")
 
@@ -172,10 +169,20 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产环境 ERP_ALLOWED_HOSTS 不可包含通配主机")
 
 
-@app.on_event("startup")
 def startup() -> None:
     validate_runtime_config()
     initialize()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup()
+    yield
+
+
+docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
+app = FastAPI(title="SM ERP", version="1.1.1", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 
 @app.middleware("http")
