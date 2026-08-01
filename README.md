@@ -43,6 +43,8 @@ ERP 支持使用 `ERP_KNOWLEDGE_BOT_INTEGRATION_KEYS=新密钥,旧密钥` 进行
 
 ## 生产部署清单
 
+管理员审计查询支持分页和筛选：`GET /api/audit-logs?limit=50&offset=0&action=auth.login&since=2026-01-01T00:00:00Z`。接口只返回管理员可见的审计记录，单页最多 100 条。
+
 1. 复制 `.env.example` 为 `.env`，填入 KMS/HSM 提供的 SM4 密钥、强管理员密码和集成密钥。
 2. 将 `ERP_ENV` 保持为 `production`，生产启动会拒绝示例密钥与示例初始化密码。
 3. 使用反向代理提供 HTTPS，并设置受信任代理来源；应用容器默认以非 root 用户运行。
