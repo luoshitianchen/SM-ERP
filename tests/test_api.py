@@ -99,3 +99,13 @@ def test_admin_audit_logs_support_pagination_and_action_filter():
         assert payload["total"] >= 1
         assert len(payload["items"]) == 1
         assert payload["items"][0]["action"] == "auth.login"
+
+
+def test_session_pruning_keeps_latest_sessions(monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "MAX_SESSIONS_PER_USER", 2)
+    with main.db() as conn:
+        for index in range(4):
+            conn.execute("INSERT OR REPLACE INTO sessions (token_hash,employee_id,expires_at,created_at,csrf_hash) VALUES (?,?,?,?,?)", (f"session-{index}", "admin", main.timestamp() + 3600, f"2026-01-01T00:00:0{index}+00:00", "csrf"))
+        main.prune_employee_sessions(conn, "admin")
+        assert conn.execute("SELECT COUNT(*) FROM sessions WHERE employee_id='admin'").fetchone()[0] == 2

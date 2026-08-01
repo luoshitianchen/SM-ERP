@@ -27,6 +27,7 @@ Role = Literal["employee", "manager", "admin"]
 ENVIRONMENT = os.getenv("ERP_ENV", "development").lower()
 SESSION_COOKIE = "sm_erp_session"
 SESSION_TTL_SECONDS = int(os.getenv("ERP_SESSION_TTL_SECONDS", "28800"))
+MAX_SESSIONS_PER_USER = int(os.getenv("ERP_MAX_SESSIONS_PER_USER", "5"))
 LOGIN_MAX_FAILURES = int(os.getenv("ERP_LOGIN_MAX_FAILURES", "5"))
 LOGIN_LOCK_SECONDS = int(os.getenv("ERP_LOGIN_LOCK_SECONDS", "900"))
 LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("ERP_LOGIN_RATE_WINDOW_SECONDS", "60"))
@@ -67,6 +68,15 @@ def timestamp() -> int:
 
 def sm3_hex(data: bytes) -> str:
     return sm3.sm3_hash(func.bytes_to_list(data))
+
+
+def prune_employee_sessions(conn: sqlite3.Connection, employee_id: str) -> None:
+    """删除过期及超出上限的旧会话，限制凭据暴露面。"""
+    conn.execute("DELETE FROM sessions WHERE expires_at<=?", (timestamp(),))
+    rows = conn.execute("SELECT token_hash FROM sessions WHERE employee_id=? ORDER BY created_at DESC", (employee_id,)).fetchall()
+    stale = [(row["token_hash"],) for row in rows[MAX_SESSIONS_PER_USER:]]
+    if stale:
+        conn.executemany("DELETE FROM sessions WHERE token_hash=?", stale)
 
 
 def password_hash(password: str, salt: str | None = None, rounds: int | None = None) -> str:
@@ -341,6 +351,7 @@ def login(payload: LoginInput, response: Response, request: Request) -> dict[str
         conn.execute("DELETE FROM login_attempts WHERE username=?", (payload.username,))
         session_token, csrf_token = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
         conn.execute("INSERT INTO sessions (token_hash,employee_id,expires_at,created_at,csrf_hash) VALUES (?,?,?,?,?)", (sm3_hex(session_token.encode()), row["id"], timestamp() + SESSION_TTL_SECONDS, now(), sm3_hex(csrf_token.encode())))
+        prune_employee_sessions(conn, row["id"])
         audit(conn, row["id"], "auth.login")
     response.set_cookie(SESSION_COOKIE, session_token, max_age=SESSION_TTL_SECONDS, httponly=True, secure=ENVIRONMENT == "production", samesite="strict", path="/")
     return {"id": row["id"], "name": row["name"], "department": row["department"], "role": row["role"], "csrf_token": csrf_token}
