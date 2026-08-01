@@ -56,6 +56,8 @@ def test_security_headers_and_request_id():
         assert response.status_code == 200
         assert response.headers["X-Request-Id"] == "audit-trace-1"
         assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert float(response.headers["X-Process-Time-Ms"]) >= 0
+        assert response.headers["Server-Timing"].startswith("app;dur=")
 
 
 def test_rejects_oversized_request_body(monkeypatch):

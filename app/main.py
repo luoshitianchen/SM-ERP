@@ -188,6 +188,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    started = datetime.now(UTC)
     supplied_request_id = request.headers.get("X-Request-Id", "")
     request_id = supplied_request_id if REQUEST_ID_PATTERN.fullmatch(supplied_request_id) else str(uuid4())
     request.state.request_id = request_id
@@ -213,10 +214,15 @@ async def security_headers(request: Request, call_next):
         if not row or row["expires_at"] <= timestamp() or not secrets.compare_digest(row["csrf_hash"] or "", sm3_hex(csrf_token.encode())):
             request_id_context.reset(context_token)
             return Response(status_code=status.HTTP_403_FORBIDDEN, content="CSRF validation failed", headers={"X-Request-Id": request_id})
-    response = await call_next(request)
-    request_id_context.reset(context_token)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_context.reset(context_token)
+    elapsed_ms = (datetime.now(UTC) - started).total_seconds() * 1000
     response.headers["X-Request-Id"] = request.state.request_id
-    logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code}, ensure_ascii=False))
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.2f}"
+    logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code, "duration_ms": round(elapsed_ms, 2)}, ensure_ascii=False))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
