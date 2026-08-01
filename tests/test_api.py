@@ -84,3 +84,16 @@ def test_integration_key_rotation_accepts_current_and_previous(monkeypatch):
     from app.main import integration_keys
     monkeypatch.setenv("ERP_KNOWLEDGE_BOT_INTEGRATION_KEYS", "current-key, previous-key")
     assert integration_keys() == ("current-key", "previous-key")
+
+
+def test_admin_audit_logs_support_pagination_and_action_filter():
+    Path(os.environ["ERP_DATABASE_PATH"]).unlink(missing_ok=True)
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        assert login.status_code == 200
+        response = client.get("/api/audit-logs?action=auth.login&limit=1&offset=0")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] >= 1
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["action"] == "auth.login"

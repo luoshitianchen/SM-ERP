@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -424,11 +424,30 @@ def create_department(payload: DepartmentInput, current: sqlite3.Row = Depends(a
 
 
 @app.get("/api/audit-logs")
-def audit_logs(current: sqlite3.Row = Depends(actor)) -> list[dict[str, object]]:
+def audit_logs(
+    current: sqlite3.Row = Depends(actor),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10_000),
+    action: str | None = Query(default=None, min_length=1, max_length=100),
+    since: str | None = Query(default=None, max_length=40),
+) -> dict[str, object]:
     if current["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+    clauses, params = [], []
+    if action:
+        clauses.append("action=?")
+        params.append(action)
+    if since:
+        try:
+            datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "since 必须是 ISO 8601 时间") from exc
+        clauses.append("created_at>=?")
+        params.append(since)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as conn:
-        rows = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100").fetchall()
+        total = conn.execute(f"SELECT COUNT(*) FROM audit_logs{where}", params).fetchone()[0]
+        rows = conn.execute(f"SELECT * FROM audit_logs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
     logs = []
     for row in rows:
         item = dict(row)
@@ -437,7 +456,7 @@ def audit_logs(current: sqlite3.Row = Depends(actor)) -> list[dict[str, object]]
         except ValueError:
             item["detail"] = "[完整性校验失败]"
         logs.append(item)
-    return logs
+    return {"items": logs, "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/api/dashboard")
