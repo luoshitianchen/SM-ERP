@@ -15,6 +15,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8100
 ```
 
+运行测试使用独立开发依赖：`pip install -r requirements-dev.txt && pytest tests -q`。
+
 复制 `.env.example` 后，先设置随机的 `ERP_SM4_KEY_HEX` 与 `ERP_BOOTSTRAP_PASSWORD`，再启动服务。系统没有内置默认密钥或默认管理员密码。
 
 知识库对接地址：`POST /api/auth/login`，请求体：
