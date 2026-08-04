@@ -109,3 +109,17 @@ def test_session_pruning_keeps_latest_sessions(monkeypatch):
             conn.execute("INSERT OR REPLACE INTO sessions (token_hash,employee_id,expires_at,created_at,csrf_hash) VALUES (?,?,?,?,?)", (f"session-{index}", "admin", main.timestamp() + 3600, f"2026-01-01T00:00:0{index}+00:00", "csrf"))
         main.prune_employee_sessions(conn, "admin")
         assert conn.execute("SELECT COUNT(*) FROM sessions WHERE employee_id='admin'").fetchone()[0] == 2
+
+
+
+def test_rate_limit_uses_lock(monkeypatch):
+    from app import main
+    main.login_rate_window.clear()
+    monkeypatch.setattr(main, "LOGIN_RATE_MAX_REQUESTS", 1)
+    main.consume_rate_limit(main.login_rate_window, main.login_rate_lock, "127.0.0.1", 60, 1)
+    try:
+        main.consume_rate_limit(main.login_rate_window, main.login_rate_lock, "127.0.0.1", 60, 1)
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 429
+    else:
+        raise AssertionError("rate limit must reject the second request")

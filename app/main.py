@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import json
 import logging
+import threading
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
@@ -37,6 +38,8 @@ INTEGRATION_RATE_MAX_REQUESTS = int(os.getenv("ERP_INTEGRATION_RATE_MAX_REQUESTS
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 login_rate_window: dict[str, tuple[int, int]] = {}
 integration_rate_window: dict[str, tuple[int, int]] = {}
+login_rate_lock = threading.Lock()
+integration_rate_lock = threading.Lock()
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -258,18 +261,19 @@ def integration_keys() -> tuple[str, ...]:
     return keys
 
 
-def consume_rate_limit(window: dict[str, tuple[int, int]], client_ip: str, period: int, maximum: int) -> None:
-    """按来源限制认证接口，并及时回收过期条目。"""
-    current_time = timestamp()
-    for ip, (started, _) in list(window.items()):
-        if current_time - started >= period:
-            window.pop(ip, None)
-    window_started, count = window.get(client_ip, (current_time, 0))
-    if current_time - window_started >= period:
-        window_started, count = current_time, 0
-    if count >= maximum:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "认证请求过于频繁，请稍后重试")
-    window[client_ip] = (window_started, count + 1)
+def consume_rate_limit(window: dict[str, tuple[int, int]], window_lock: threading.Lock, client_ip: str, period: int, maximum: int) -> None:
+    """按来源限制认证接口，并及时回收过期条目；加锁避免并发竞态绕过。"""
+    with window_lock:
+        current_time = timestamp()
+        for ip, (started, _) in list(window.items()):
+            if current_time - started >= period:
+                window.pop(ip, None)
+        window_started, count = window.get(client_ip, (current_time, 0))
+        if current_time - window_started >= period:
+            window_started, count = current_time, 0
+        if count >= maximum:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "认证请求过于频繁，请稍后重试")
+        window[client_ip] = (window_started, count + 1)
 
 
 class EmployeeInput(BaseModel):
@@ -331,7 +335,7 @@ def ready() -> dict[str, str]:
 @app.post("/api/auth/login")
 def login(payload: LoginInput, response: Response, request: Request) -> dict[str, str]:
     client_ip = request.client.host if request.client else "unknown"
-    consume_rate_limit(login_rate_window, client_ip, LOGIN_RATE_WINDOW_SECONDS, LOGIN_RATE_MAX_REQUESTS)
+    consume_rate_limit(login_rate_window, login_rate_lock, client_ip, LOGIN_RATE_WINDOW_SECONDS, LOGIN_RATE_MAX_REQUESTS)
     with db() as conn:
         attempt = conn.execute("SELECT * FROM login_attempts WHERE username=?", (payload.username,)).fetchone()
         if attempt and attempt["locked_until"] > timestamp():
@@ -361,7 +365,7 @@ def login(payload: LoginInput, response: Response, request: Request) -> dict[str
 def knowledge_bot_auth(payload: LoginInput, request: Request, x_integration_key: str | None = Header(default=None)) -> dict[str, str]:
     """供知识库后端调用的受密钥保护身份验证接口，不创建浏览器会话。"""
     client_ip = request.client.host if request.client else "unknown"
-    consume_rate_limit(integration_rate_window, client_ip, INTEGRATION_RATE_WINDOW_SECONDS, INTEGRATION_RATE_MAX_REQUESTS)
+    consume_rate_limit(integration_rate_window, integration_rate_lock, client_ip, INTEGRATION_RATE_WINDOW_SECONDS, INTEGRATION_RATE_MAX_REQUESTS)
     if not x_integration_key or not any(secrets.compare_digest(x_integration_key, key) for key in integration_keys()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "集成密钥无效")
     with db() as conn:
