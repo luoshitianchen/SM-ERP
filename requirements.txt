@@ -1,4 +1,4 @@
 fastapi==0.115.14
 uvicorn[standard]==0.34.3
-pydantic==2.10.6
+pydantic==2.13.4
 gmssl==3.2.2
