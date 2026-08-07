@@ -195,7 +195,7 @@ async def lifespan(_: FastAPI):
 
 
 docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
-app = FastAPI(title="SM ERP", version="1.1.1", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan)
+app = FastAPI(title="SM ERP", version="2.0.0", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 
