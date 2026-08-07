@@ -1,6 +1,6 @@
 # SM ERP
 
-**正式版：** [v1.1.1 发布说明与源码下载](https://github.com/luoshitianchen/SM-ERP/releases/tag/v1.1.1)
+**正式版：** [v2.0.0 发布说明与源码下载](https://github.com/luoshitianchen/SM-ERP/releases/tag/v2.0.0)
 
 独立的企业资源与身份管理系统，为 `SM Knowledge Bot` 提供 ERP 登录、员工、部门和角色信息。
 
