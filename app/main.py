@@ -313,13 +313,20 @@ def dashboard() -> FileResponse:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, object]:
     try:
         with db() as conn:
             conn.execute("SELECT 1").fetchone()
     except sqlite3.Error as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "数据库不可用") from exc
-    return {"status": "ok", "version": app.version, "database": "ok"}
+    return {
+        "status": "ok",
+        "service": "sm-erp",
+        "version": app.version,
+        "database": "ok",
+        "checks": {"database": "ok", "crypto": "sm3-sm4"},
+        "timestamp": now(),
+    }
 
 
 @app.get("/readyz")
@@ -329,7 +336,7 @@ def ready() -> dict[str, str]:
         conn.execute("SELECT 1").fetchone()
     if ENVIRONMENT == "production":
         master_key()
-    return {"status": "ready"}
+    return {"status": "ready", "service": "sm-erp", "version": app.version, "checks": {"database": "ok", "crypto": "configured"}, "timestamp": now()}
 
 
 @app.post("/api/auth/login")
