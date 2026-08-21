@@ -43,7 +43,7 @@ jobs:
       - run: bandit -q -r app -x tests
       - run: ruff check app tests
       - run: cyclonedx-py environment --output-file sbom.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: erp-sbom
           path: sbom.cdx.json
