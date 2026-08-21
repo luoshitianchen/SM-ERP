@@ -27,7 +27,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   codeql:
-    uses: github/codeql-action/.github/workflows/codeql.yml@v3
+    uses: github/codeql-action/.github/workflows/codeql.yml@v4.37.4
     with:
       languages: python
   dependency-audit:
