@@ -125,3 +125,39 @@ def test_rate_limit_uses_lock(monkeypatch):
         assert getattr(exc, "status_code", None) == 429
     else:
         raise AssertionError("rate limit must reject the second request")
+
+def test_admin_ops_metrics_requires_admin_and_reports_runtime():
+    Path(os.environ["ERP_DATABASE_PATH"]).unlink(missing_ok=True)
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        assert login.status_code == 200
+        response = client.get("/api/ops/metrics")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["service"] == "sm-erp"
+        assert payload["requests_total"] >= 1
+        assert "avg_latency_ms" in payload
+
+def test_web_console_stores_csrf_token_and_exposes_ops_view():
+    html = Path("app/static/index.html").read_text(encoding="utf-8")
+    assert "csrfToken=user.csrf_token||''" in html
+    assert "data-view=\"ops\"" in html
+    assert "/api/ops/metrics" in html
+
+def test_api_rate_limit_is_enforced(monkeypatch):
+    from app import main
+    main.api_rate_window.clear()
+    monkeypatch.setattr(main, "API_RATE_MAX_REQUESTS", 1)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").status_code == 429
+
+
+def test_admin_audit_logs_do_not_expose_detail_field():
+    Path(os.environ["ERP_DATABASE_PATH"]).unlink(missing_ok=True)
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        assert login.status_code == 200
+        payload = client.get("/api/audit-logs?action=auth.login").json()
+        assert payload["items"]
+        assert "detail" not in payload["items"][0]

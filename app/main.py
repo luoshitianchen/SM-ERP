@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from gmssl import func, sm3
 from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 
+VERSION = "2.3.0"
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
@@ -36,11 +37,17 @@ LOGIN_RATE_MAX_REQUESTS = int(os.getenv("ERP_LOGIN_RATE_MAX_REQUESTS", "20"))
 INTEGRATION_RATE_WINDOW_SECONDS = int(os.getenv("ERP_INTEGRATION_RATE_WINDOW_SECONDS", "60"))
 INTEGRATION_RATE_MAX_REQUESTS = int(os.getenv("ERP_INTEGRATION_RATE_MAX_REQUESTS", "60"))
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
+API_RATE_WINDOW_SECONDS = int(os.getenv("ERP_API_RATE_WINDOW_SECONDS", "60"))
+API_RATE_MAX_REQUESTS = int(os.getenv("ERP_API_RATE_MAX_REQUESTS", "600"))
 login_rate_window: dict[str, tuple[int, int]] = {}
 integration_rate_window: dict[str, tuple[int, int]] = {}
+api_rate_window: dict[str, tuple[int, int]] = {}
 login_rate_lock = threading.Lock()
 integration_rate_lock = threading.Lock()
+api_rate_lock = threading.Lock()
 request_id_context: ContextVar[str] = ContextVar("request_id", default="system")
+metrics_lock = threading.Lock()
+metrics = {"requests_total": 0, "errors_total": 0, "latency_ms_total": 0.0}
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 allowed_hosts = [host.strip() for host in os.getenv("ERP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if host.strip()]
@@ -195,7 +202,7 @@ async def lifespan(_: FastAPI):
 
 
 docs_enabled = os.getenv("ERP_ENABLE_DOCS", "false").lower() == "true"
-app = FastAPI(title="SM ERP", version="2.0.0", description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan)
+app = FastAPI(title="SM ERP", version=VERSION, description="企业资源与身份管理系统", docs_url="/docs" if docs_enabled else None, redoc_url=None, openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 
@@ -216,6 +223,12 @@ async def security_headers(request: Request, call_next):
         if body_size < 0 or body_size > MAX_REQUEST_BYTES:
             request_id_context.reset(context_token)
             return Response(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content="Request body too large", headers={"X-Request-Id": request_id})
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        consume_rate_limit(api_rate_window, api_rate_lock, f"{client_ip}:{request.url.path}", API_RATE_WINDOW_SECONDS, API_RATE_MAX_REQUESTS)
+    except HTTPException as exc:
+        request_id_context.reset(context_token)
+        return Response(status_code=exc.status_code, content=str(exc.detail), headers={"X-Request-Id": request_id, "Retry-After": str(API_RATE_WINDOW_SECONDS)})
     if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
         session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
@@ -235,12 +248,17 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Request-Id"] = request.state.request_id
     response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
     response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.2f}"
+    with metrics_lock:
+        metrics["requests_total"] += 1
+        metrics["latency_ms_total"] += elapsed_ms
+        if response.status_code >= 500:
+            metrics["errors_total"] += 1
     logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code, "duration_ms": round(elapsed_ms, 2)}, ensure_ascii=False))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
     if ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
@@ -312,6 +330,17 @@ def audit(conn: sqlite3.Connection, actor_id: str, action: str, detail: str = ""
 @app.get("/", include_in_schema=False)
 def dashboard() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+@app.get("/api/ops/metrics")
+def ops_metrics(current=Depends(actor)) -> dict[str, object]:
+    if current["role"] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
+    with metrics_lock:
+        snapshot = dict(metrics)
+    total = int(snapshot["requests_total"])
+    avg_latency = round(float(snapshot["latency_ms_total"]) / total, 2) if total else 0.0
+    return {"service": "sm-erp", "version": app.version, "requests_total": total, "errors_total": int(snapshot["errors_total"]), "avg_latency_ms": avg_latency}
 
 
 @app.get("/health")
@@ -417,7 +446,7 @@ def create_employee(payload: EmployeeInput, current: sqlite3.Row = Depends(actor
             conn.execute("INSERT INTO employees VALUES (?,?,?,?,?,?,1,?)", (employee_id, payload.username, password_hash(payload.password), payload.name, payload.department, payload.role, now()))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "ERP 账号已存在") from exc
-        audit(conn, current["id"], "employee.created", payload.username)
+        audit(conn, current["id"], "employee.created", f"employee_id={employee_id}")
     return {"id": employee_id, "message": "员工已创建"}
 
 
@@ -450,7 +479,7 @@ def create_department(payload: DepartmentInput, current: sqlite3.Row = Depends(a
             conn.execute("INSERT INTO departments VALUES (?,?,NULL)", (payload.id, payload.name))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "部门 ID 或名称已存在") from exc
-        audit(conn, current["id"], "department.created", payload.id)
+        audit(conn, current["id"], "department.created", f"department_id={payload.id}")
     return {"id": payload.id, "message": "部门已创建"}
 
 
@@ -487,7 +516,7 @@ def audit_logs(
         except ValueError:
             item["detail"] = "[完整性校验失败]"
         logs.append(item)
-    return {"items": logs, "total": total, "limit": limit, "offset": offset}
+    return {"items": [{k: v for k, v in item.items() if k != "detail"} for item in logs], "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/api/dashboard")

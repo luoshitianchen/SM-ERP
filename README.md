@@ -63,3 +63,52 @@ Docker 默认仅监听 `127.0.0.1:8100`，不会直接暴露到公网。对外�
 ## 备份与恢复
 
 执行 `./backup.ps1` 可在 `backup/` 目录生成 SQLite 一致性备份。备份目录不纳入 Git；应将备份转存到加密、受访问控制的企业备份存储，并定期进行恢复演练。
+
+## v2.1 企业维护升级
+- 统一版本提升到 `2.1.0`，提供 `/health` 与 `/readyz` 运维探针。
+- 国密能力保持 SM3 口令派生、SM4-CBC 敏感审计字段加密、SM3 MAC 完整性校验。
+- 登录、集成认证、会话、CSRF、审计分页继续按企业最小权限模型执行。
+- 推荐安装方式：
+
+```powershell
+git clone https://github.com/luoshitianchen/SM-ERP.git
+cd SM-ERP
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8100
+```
+
+### v2.1 运维观测接口
+管理员登录后可访问：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8100/api/ops/metrics -WebSession $session
+```
+
+返回请求总量、错误总量、平均延迟，便于接入企业监控平台或桌面融合门户。
+
+### v2.1 本地质量门禁
+提交前推荐执行：
+
+```powershell
+.\quality.ps1
+```
+
+如只进行快速回归测试：
+
+```powershell
+.\quality.ps1 -SkipAudit
+```
+
+## v2.2 全量升级
+- 服务版本统一提升到 `2.2.0`。
+- Web 控制台登录后自动保存 CSRF Token，员工、部门、审计等受保护操作可完成会话校验。
+- 新增“运行状态”菜单，直接展示 `/api/ops/metrics` 请求总量、错误总量和平均延迟。
+
+## v2.3 安全防护增强
+- 服务版本统一提升到 `2.3.0`。
+- 新增全局 API 速率限制，登录与集成认证限流之外进一步保护普通接口。
+- 速率限制命中后返回 `429` 和 `Retry-After`。
+- CSP 增加 `connect-src`、`img-src`、`form-action`。
+- 管理员审计查询默认不返回 `detail` 字段，并减少员工创建审计中的账号名暴露。

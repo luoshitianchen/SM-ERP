@@ -11,6 +11,10 @@ permissions:
   contents: read
   security-events: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   secret-scan:
     name: Secret scan
@@ -33,9 +37,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install --upgrade pip pip-audit cyclonedx-bom
+      - run: python -m pip install --upgrade pip pip-audit cyclonedx-bom bandit ruff
       - run: pip install -r requirements.txt
       - run: pip-audit -r requirements.txt
+      - run: bandit -q -r app -x tests
+      - run: ruff check app tests
       - run: cyclonedx-py environment --output-file sbom.cdx.json
       - uses: actions/upload-artifact@v4
         with:
