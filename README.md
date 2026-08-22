@@ -118,3 +118,9 @@ Invoke-RestMethod http://127.0.0.1:8100/api/ops/metrics -WebSession $session
 - 核心服务同步升级并提供 `/api/crypto/status`。
 - Knowledge Bot 额外提供 `/api/crypto/sm3` 摘要接口。
 - 国密密钥通过环境变量或 KMS/HSM 注入。
+
+
+## 2026-08-22 维护记录
+- 完成源码编译检查、单元测试和工作区状态检查。
+- 保持安全响应头、TrustedHost、限流、请求大小限制、国密 SM3/SM4 与内部令牌控制。
+- 维护建议：生产环境通过 KMS/HSM 注入密钥，依赖项目全部启动后再执行融合门户整体健康检查。
