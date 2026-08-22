@@ -112,3 +112,9 @@ Invoke-RestMethod http://127.0.0.1:8100/api/ops/metrics -WebSession $session
 - 速率限制命中后返回 `429` 和 `Retry-After`。
 - CSP 增加 `connect-src`、`img-src`、`form-action`。
 - 管理员审计查询默认不返回 `detail` 字段，并减少员工创建审计中的账号名暴露。
+
+
+## v2.4 全量国密同步
+- 核心服务同步升级并提供 `/api/crypto/status`。
+- Knowledge Bot 额外提供 `/api/crypto/sm3` 摘要接口。
+- 国密密钥通过环境变量或 KMS/HSM 注入。

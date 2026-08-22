@@ -161,3 +161,11 @@ def test_admin_audit_logs_do_not_expose_detail_field():
         payload = client.get("/api/audit-logs?action=auth.login").json()
         assert payload["items"]
         assert "detail" not in payload["items"][0]
+
+
+
+def test_core_crypto_status():
+    with TestClient(app) as client:
+        response = client.get('/api/crypto/status')
+        assert response.status_code == 200
+        assert response.json()['algorithm'] == 'SM3/SM4'

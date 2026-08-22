@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from gmssl import func, sm3
 from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
@@ -526,3 +526,8 @@ def dashboard_data(current: sqlite3.Row = Depends(actor)) -> dict[str, object]:
         department_count = conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0]
         logs = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 8").fetchall()
     return {"user": {"id": current["id"], "name": current["name"], "role": current["role"], "department": current["department"]}, "employees": employee_count, "departments": department_count, "activities": [dict(row) for row in logs]}
+
+
+@app.get("/api/crypto/status")
+def crypto_status() -> dict[str, object]:
+    return {"algorithm": "SM3/SM4", "sm3": "enabled", "sm4": "enabled", "key_source": "ERP_SM4_KEY_HEX environment"}
