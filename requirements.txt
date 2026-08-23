@@ -3,3 +3,4 @@ uvicorn[standard]==0.52.3
 pydantic==2.13.4
 gmssl==3.2.2
 
+
