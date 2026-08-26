@@ -20,21 +20,21 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   codeql:
-    uses: github/codeql-action/.github/workflows/codeql.yml@v3
+    uses: github/codeql-action/.github/workflows/codeql.yml@v4
     with:
       languages: python
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - run: python -m pip install --upgrade pip pip-audit cyclonedx-bom bandit ruff
@@ -43,7 +43,8 @@ jobs:
       - run: bandit -q -r app -x tests
       - run: ruff check app tests
       - run: cyclonedx-py environment --output-file sbom.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: erp-sbom
           path: sbom.cdx.json
+
