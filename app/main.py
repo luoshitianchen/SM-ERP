@@ -39,6 +39,8 @@ INTEGRATION_RATE_MAX_REQUESTS = int(os.getenv("ERP_INTEGRATION_RATE_MAX_REQUESTS
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 API_RATE_WINDOW_SECONDS = int(os.getenv("ERP_API_RATE_WINDOW_SECONDS", "60"))
 API_RATE_MAX_REQUESTS = int(os.getenv("ERP_API_RATE_MAX_REQUESTS", "600"))
+# 需要 CSRF 校验豁免的写路径（默认与旧版硬编码一致，可通过环境变量调整）
+CSRF_EXEMPT_PATHS = {item.strip() for item in os.getenv("ERP_CSRF_EXEMPT_PATHS", "/api/auth/login,/api/integrations/knowledge-bot/auth").split(",") if item.strip()}
 login_rate_window: dict[str, tuple[int, int]] = {}
 integration_rate_window: dict[str, tuple[int, int]] = {}
 api_rate_window: dict[str, tuple[int, int]] = {}
@@ -229,7 +231,7 @@ async def security_headers(request: Request, call_next):
     except HTTPException as exc:
         request_id_context.reset(context_token)
         return Response(status_code=exc.status_code, content=str(exc.detail), headers={"X-Request-Id": request_id, "Retry-After": str(API_RATE_WINDOW_SECONDS)})
-    if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in {"/api/auth/login", "/api/integrations/knowledge-bot/auth"}:
+    if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in CSRF_EXEMPT_PATHS:
         session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
         if not session_token or not csrf_token:
@@ -262,8 +264,6 @@ async def security_headers(request: Request, call_next):
     if ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
-    if ENVIRONMENT == "production":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
