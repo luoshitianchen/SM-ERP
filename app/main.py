@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import re
 import sqlite3
-import hashlib
 import secrets
-import json
-import logging
 import threading
+import logging
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
@@ -22,7 +24,7 @@ from pydantic import BaseModel, Field
 from gmssl import func, sm3
 from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
@@ -39,7 +41,9 @@ INTEGRATION_RATE_MAX_REQUESTS = int(os.getenv("ERP_INTEGRATION_RATE_MAX_REQUESTS
 MAX_REQUEST_BYTES = int(os.getenv("ERP_MAX_REQUEST_BYTES", "1048576"))
 API_RATE_WINDOW_SECONDS = int(os.getenv("ERP_API_RATE_WINDOW_SECONDS", "60"))
 API_RATE_MAX_REQUESTS = int(os.getenv("ERP_API_RATE_MAX_REQUESTS", "600"))
-# 需要 CSRF 校验豁免的写路径（默认与旧版硬编码一致，可通过环境变量调整）
+JWT_SECRET = os.getenv("SM_JWT_SECRET", "")
+AUDIT_CENTER_URL = os.getenv("SM_AUDIT_CENTER_URL", "")
+SM_INTERNAL_API_KEY = os.getenv("SM_INTERNAL_API_KEY", "")
 CSRF_EXEMPT_PATHS = {item.strip() for item in os.getenv("ERP_CSRF_EXEMPT_PATHS", "/api/auth/login,/api/integrations/knowledge-bot/auth").split(",") if item.strip()}
 login_rate_window: dict[str, tuple[int, int]] = {}
 integration_rate_window: dict[str, tuple[int, int]] = {}
@@ -55,6 +59,31 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 allowed_hosts = [host.strip() for host in os.getenv("ERP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if host.strip()]
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 logger = logging.getLogger("sm_erp")
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def verify_jwt(token: str) -> dict[str, object] | None:
+    if not JWT_SECRET:
+        return None
+    try:
+        header_b64, claims_b64, signature_b64 = token.split(".")
+        signing_input = f"{header_b64}.{claims_b64}".encode()
+        expected = hmac.new(JWT_SECRET.encode(), signing_input, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, b64url_decode(signature_b64)):
+            return None
+        claims = json.loads(b64url_decode(claims_b64))
+        if int(claims.get("exp", 0)) < int(datetime.now(UTC).timestamp()):
+            return None
+        return claims
+    except Exception:
+        return None
 
 
 @contextmanager
@@ -127,6 +156,21 @@ def derive_key(label: str) -> bytes:
     return bytes.fromhex(sm3_hex(master_key() + label.encode()))[:16]
 
 
+def sm4_crypt(value: bytes, encrypt: bool) -> bytes:
+    """通用 SM4-CBC（IV 前置 16 字节），用于对外加解密端点。"""
+    key = derive_key("sm4-encryption")
+    cipher = CryptSM4()
+    cipher.set_key(key, SM4_ENCRYPT if encrypt else SM4_DECRYPT)
+    if encrypt:
+        iv = secrets.token_bytes(16)
+        return iv + cipher.crypt_cbc(iv, value)
+    if len(value) < 16:
+        raise ValueError("ciphertext too short")
+    iv, body = value[:16], value[16:]
+    cipher.set_key(key, SM4_DECRYPT)
+    return cipher.crypt_cbc(iv, body)
+
+
 def encrypt_sensitive(value: str) -> str:
     """SM4-CBC 加密并追加 SM3 MAC，供审计详情等敏感字段使用。"""
     encryption_key, mac_key, iv = derive_key("sm4-encryption"), derive_key("sm3-audit-mac"), secrets.token_bytes(16)
@@ -175,7 +219,6 @@ def initialize() -> None:
         if not bootstrap_password:
             raise RuntimeError("必须配置 ERP_BOOTSTRAP_PASSWORD")
         conn.execute("INSERT OR IGNORE INTO employees VALUES ('admin','admin',?,'系统管理员','engineering','admin',1,?)", (password_hash(bootstrap_password), now()))
-        # 明文演示口令可启动时迁移；scrypt 口令将在首次成功登录时迁移，避免丢失校验能力。
         legacy = conn.execute("SELECT password FROM employees WHERE id='admin'").fetchone()
         if legacy and not legacy["password"].startswith(("sm3$", "scrypt$")):
             conn.execute("UPDATE employees SET password=? WHERE id='admin'", (password_hash(legacy["password"]),))
@@ -190,6 +233,8 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产环境必须设置 ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
         if any(host in {"*", "0.0.0.0"} for host in allowed_hosts):
             raise RuntimeError("生产环境 ERP_ALLOWED_HOSTS 不可包含通配主机")
+        if not JWT_SECRET:
+            raise RuntimeError("生产环境必须设置 SM_JWT_SECRET")
 
 
 def startup() -> None:
@@ -231,7 +276,14 @@ async def security_headers(request: Request, call_next):
     except HTTPException as exc:
         request_id_context.reset(context_token)
         return Response(status_code=exc.status_code, content=str(exc.detail), headers={"X-Request-Id": request_id, "Retry-After": str(API_RATE_WINDOW_SECONDS)})
-    if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.url.path not in CSRF_EXEMPT_PATHS:
+    authorization = request.headers.get("Authorization", "")
+    bearer_authenticated = False
+    if authorization.startswith("Bearer "):
+        if not (JWT_SECRET and verify_jwt(authorization[7:])):
+            request_id_context.reset(context_token)
+            return Response(status_code=status.HTTP_401_UNAUTHORIZED, content="认证无效", headers={"X-Request-Id": request_id})
+        bearer_authenticated = True
+    if request.method in {"POST", "PATCH", "PUT", "DELETE"} and not bearer_authenticated and request.url.path not in CSRF_EXEMPT_PATHS:
         session_token = request.cookies.get(SESSION_COOKIE)
         csrf_token = request.headers.get("X-CSRF-Token")
         if not session_token or not csrf_token:
@@ -322,9 +374,22 @@ def actor(session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE)
     return row
 
 
+def _forward_audit(actor_id: str, action: str, detail: str, request_id: str) -> None:
+    import urllib.request as _ur
+    try:
+        event = {"event_id": str(uuid4()), "service": "sm-erp", "action": action, "actor": actor_id, "timestamp": now(), "request_id": request_id, "trace_id": "", "detail": detail[:2000]}
+        body = json.dumps(event, ensure_ascii=False).encode("utf-8")
+        req = _ur.Request(AUDIT_CENTER_URL.rstrip("/") + "/api/audit/events", data=body, headers={"Content-Type": "application/json", "X-Internal-Token": SM_INTERNAL_API_KEY}, method="POST")
+        _ur.urlopen(req, timeout=2)
+    except Exception:
+        pass
+
+
 def audit(conn: sqlite3.Connection, actor_id: str, action: str, detail: str = "") -> None:
     enriched = f"request_id={request_id_context.get()} {detail}".strip()
     conn.execute("INSERT INTO audit_logs VALUES (?,?,?,?,?)", (str(uuid4()), actor_id, action, encrypt_sensitive(enriched), now()))
+    if AUDIT_CENTER_URL:
+        threading.Thread(target=_forward_audit, args=(actor_id, action, enriched, request_id_context.get()), daemon=True).start()
 
 
 @app.get("/", include_in_schema=False)
@@ -341,6 +406,18 @@ def ops_metrics(current=Depends(actor)) -> dict[str, object]:
     total = int(snapshot["requests_total"])
     avg_latency = round(float(snapshot["latency_ms_total"]) / total, 2) if total else 0.0
     return {"service": "sm-erp", "version": app.version, "requests_total": total, "errors_total": int(snapshot["errors_total"]), "avg_latency_ms": avg_latency}
+
+
+@app.get("/metrics")
+def prometheus_metrics() -> Response:
+    with metrics_lock:
+        snapshot = dict(metrics)
+    body = (
+        f"sm_erp_requests_total {int(snapshot['requests_total'])}"
+        f"\nsm_erp_errors_total {int(snapshot['errors_total'])}"
+        f"\nsm_erp_latency_ms_total {snapshot['latency_ms_total']:.2f}\n"
+    )
+    return Response(content=body, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/health")
@@ -385,7 +462,6 @@ def login(payload: LoginInput, response: Response, request: Request) -> dict[str
             conn.execute("""INSERT INTO login_attempts VALUES (?,?,?) ON CONFLICT(username)
                          DO UPDATE SET failures=excluded.failures,locked_until=excluded.locked_until""", (payload.username, failures, locked_until))
             audit(conn, "system", "auth.login_failed", f"username={payload.username}")
-            # 认证失败会抛出 HTTPException；此处显式提交以保留锁定计数。
             conn.commit()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
         if not row["password"].startswith("sm3$"):
@@ -528,6 +604,68 @@ def dashboard_data(current: sqlite3.Row = Depends(actor)) -> dict[str, object]:
     return {"user": {"id": current["id"], "name": current["name"], "role": current["role"], "department": current["department"]}, "employees": employee_count, "departments": department_count, "activities": [dict(row) for row in logs]}
 
 
+@app.get("/api/integration/manifest")
+def integration_manifest() -> dict[str, object]:
+    return {
+        "service": "sm-erp",
+        "name": "SM ERP",
+        "version": app.version,
+        "dependencies": ["sm-audit-log-center", "sm-knowledge-bot"],
+        "events": ["auth.login", "employee.changed", "department.changed", "audit.recorded"],
+        "health_path": "/health",
+        "metrics_path": "/api/ops/metrics",
+        "overview_path": "/api/dashboard",
+    }
+
+
+@app.post("/api/crypto/sm3")
+def crypto_sm3(payload: dict[str, str]) -> dict[str, str]:
+    value = payload.get("value", "")
+    if len(value) > 10000:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "内容过大")
+    return {"algorithm": "SM3", "digest": sm3_hex(value.encode("utf-8"))}
+
+
+@app.post("/api/crypto/encrypt")
+def crypto_encrypt(payload: dict[str, str]) -> dict[str, str]:
+    value = payload.get("value", "")
+    if len(value) > 10000:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "内容过大")
+    return {"algorithm": "SM4-CBC", "ciphertext": sm4_crypt(value.encode("utf-8"), True).hex()}
+
+
+@app.post("/api/crypto/decrypt")
+def crypto_decrypt(payload: dict[str, str]) -> dict[str, str]:
+    try:
+        value = bytes.fromhex(payload.get("value", ""))
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密文必须是十六进制")
+    return {"algorithm": "SM4-CBC", "plaintext": sm4_crypt(value, False).decode("utf-8")}
+
+
 @app.get("/api/crypto/status")
 def crypto_status() -> dict[str, object]:
     return {"algorithm": "SM3/SM4", "sm3": "enabled", "sm4": "enabled", "key_source": "ERP_SM4_KEY_HEX environment"}
+
+
+@app.get("/api/security/baseline")
+def security_baseline() -> dict[str, object]:
+    return {
+        "service": "sm-erp",
+        "version": app.version,
+        "controls": {
+            "trusted_host": True,
+            "security_headers": True,
+            "csp": True,
+            "csrf": True,
+            "rate_limit": True,
+            "login_lockout": True,
+            "sm3": True,
+            "sm4": True,
+            "jwt": bool(JWT_SECRET),
+            "internal_token": bool(SM_INTERNAL_API_KEY),
+            "audit_encryption": True,
+            "audit_forwarding": bool(AUDIT_CENTER_URL),
+        },
+        "recommended": ["OIDC/MFA", "KMS/HSM", "centralized audit", "OpenTelemetry"],
+    }
