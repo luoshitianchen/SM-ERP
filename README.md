@@ -124,3 +124,14 @@ Invoke-RestMethod http://127.0.0.1:8100/api/ops/metrics -WebSession $session
 - 完成源码编译检查、单元测试和工作区状态检查。
 - 保持安全响应头、TrustedHost、限流、请求大小限制、国密 SM3/SM4 与内部令牌控制。
 - 维护建议：生产环境通过 KMS/HSM 注入密钥，依赖项目全部启动后再执行融合门户整体健康检查。
+
+## 企业维护资料
+
+- [安全基线](SECURITY_BASELINE.md)
+- [运维与可观测性](OPERATIONS.md)
+- [应急响应手册](INCIDENT_RESPONSE.md)
+- [生产部署检查清单](DEPLOYMENT_CHECKLIST.md)
+- [变更记录](CHANGELOG.md)
+- [版本号](VERSION)
+- [依赖锁定](requirements.lock)
+
