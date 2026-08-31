@@ -639,7 +639,7 @@ def crypto_decrypt(payload: dict[str, str]) -> dict[str, str]:
     try:
         value = bytes.fromhex(payload.get("value", ""))
     except ValueError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密文必须是十六进制")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "密文必须是十六进制") from None
     return {"algorithm": "SM4-CBC", "plaintext": sm4_crypt(value, False).decode("utf-8")}
 
 
