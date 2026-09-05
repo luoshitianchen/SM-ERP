@@ -1,0 +1,39 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:cabddc8a-ecb8-4a14-bb85-279b3e29339f",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "SM-ERP",
+      "version": "3.0.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "fastapi",
+      "version": "0.141.1",
+      "purl": "pkg:pypi/fastapi@0.141.1"
+    },
+    {
+      "type": "library",
+      "name": "uvicorn[standard]",
+      "version": "0.52.4",
+      "purl": "pkg:pypi/uvicorn[standard]@0.52.4"
+    },
+    {
+      "type": "library",
+      "name": "pydantic",
+      "version": "2.13.4",
+      "purl": "pkg:pypi/pydantic@2.13.4"
+    },
+    {
+      "type": "library",
+      "name": "gmssl",
+      "version": "3.2.2",
+      "purl": "pkg:pypi/gmssl@3.2.2"
+    }
+  ]
+}
