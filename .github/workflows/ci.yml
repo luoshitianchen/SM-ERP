@@ -15,4 +15,5 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest tests -q
       - run: docker compose config
-
+      - run: python -m pip_audit -r requirements.txt
+      - run: python -c "import json,os; assert os.path.exists('sbom.json'); d=json.load(open('sbom.json')); assert d.get('bomFormat')=='CycloneDX' and d['components']; print(f\"SBOM OK: {len(d['components'])} components\")"

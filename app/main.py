@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from gmssl import func, sm3
 from gmssl.sm4 import CryptSM4, SM4_DECRYPT, SM4_ENCRYPT
 
-VERSION = "2.5.0"
+VERSION = "3.0.0"
 DATABASE = Path(os.getenv("ERP_DATABASE_PATH", "data/erp.db"))
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
 Role = Literal["employee", "manager", "admin"]
