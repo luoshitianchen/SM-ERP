@@ -231,7 +231,7 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产环境必须设置强 ERP_BOOTSTRAP_PASSWORD")
         if not integration_keys() or any(key.startswith("REPLACE_") for key in integration_keys()):
             raise RuntimeError("生产环境必须设置 ERP_KNOWLEDGE_BOT_INTEGRATION_KEY")
-        if any(host in {"*", "0.0.0.0"} for host in allowed_hosts):
+        if any(host in {"*", "0.0.0.0"} for host in allowed_hosts):  # nosec B104  # 防御性host绑定检查
             raise RuntimeError("生产环境 ERP_ALLOWED_HOSTS 不可包含通配主机")
         if not JWT_SECRET:
             raise RuntimeError("生产环境必须设置 SM_JWT_SECRET")
@@ -380,8 +380,8 @@ def _forward_audit(actor_id: str, action: str, detail: str, request_id: str) -> 
         event = {"event_id": str(uuid4()), "service": "sm-erp", "action": action, "actor": actor_id, "timestamp": now(), "request_id": request_id, "trace_id": "", "detail": detail[:2000]}
         body = json.dumps(event, ensure_ascii=False).encode("utf-8")
         req = _ur.Request(AUDIT_CENTER_URL.rstrip("/") + "/api/audit/events", data=body, headers={"Content-Type": "application/json", "X-Internal-Token": SM_INTERNAL_API_KEY}, method="POST")
-        _ur.urlopen(req, timeout=2)
-    except Exception:
+        _ur.urlopen(req, timeout=2)  # nosec B310  # 审计转发至受控内部URL，带X-Internal-Token认证
+    except Exception:  # nosec B110  # 故意忽略：审计转发失败不影响主流程
         pass
 
 
@@ -582,8 +582,8 @@ def audit_logs(
         params.append(since)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with db() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM audit_logs{where}", params).fetchone()[0]
-        rows = conn.execute(f"SELECT * FROM audit_logs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
+        total = conn.execute(f"SELECT COUNT(*) FROM audit_logs{where}", params).fetchone()[0]  # nosec B608  # SQL片段为程序生成，用户输入已参数化
+        rows = conn.execute(f"SELECT * FROM audit_logs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()  # nosec B608  # SQL片段为程序生成，用户输入已参数化
     logs = []
     for row in rows:
         item = dict(row)
