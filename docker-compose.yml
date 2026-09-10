@@ -1,21 +1,41 @@
+version: "3.9"
 services:
-  sm-erp:
-    build: .
+  sm-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sm-service
     ports:
-      - "127.0.0.1:${ERP_PORT:-8100}:8100"
-    env_file:
-      - path: .env
-        required: false
+      - "8300:8300"
     environment:
-      ERP_DATABASE_PATH: /app/data/erp.db
-    volumes:
-      - ./data:/app/data
+      - SM_ENV=development
+      - SM_LOG_FORMAT=console
+      - SM_DATABASE_URL=postgresql+asyncpg://sm_user:sm_password@postgres:5432/sm_service_db
+      - SM_INTERNAL_API_KEY=dev-internal-key
+      - SM_JWT_SECRET=dev-jwt-secret-32chars-minimum
+      - SM_SM4_KEY_HEX=0123456789abcdef0123456789abcdef
+      - SM_AUDIT_CENTER_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    pids_limit: 100
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sm-service-postgres
+    environment:
+      - POSTGRES_USER=sm_user
+      - POSTGRES_PASSWORD=sm_password
+      - POSTGRES_DB=sm_service_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sm_user -d sm_service_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

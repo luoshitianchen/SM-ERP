@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sm-service
+  namespace: sm-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: sm-service
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: sm-platform
+      ports:
+        - protocol: TCP
+          port: 8300
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: sm-platform
+      ports:
+        - protocol: TCP
+          port: 8300
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
