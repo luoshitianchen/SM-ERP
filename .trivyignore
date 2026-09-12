@@ -1,0 +1,2 @@
+# Dev dependencies - not deployed in production
+# These are only used in CI/CD and development environments
