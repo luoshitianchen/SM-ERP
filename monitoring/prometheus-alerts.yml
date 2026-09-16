@@ -1,0 +1,45 @@
+groups:
+- name: sm-erp-alerts
+  rules:
+  - alert: SMERPServiceDown
+    expr: up{job="sm-erp"} == 0
+    for: 1m
+    labels:
+      severity: Critical
+      service: sm-erp
+    annotations:
+      summary: '{{ $labels.instance }} SM ERP 服务不可用'
+      description: SM ERP（sm-erp）的 up 指标已连续 1 分钟为 0，目标实例可能已宕机或无法被 Prometheus 抓取。
+  - alert: SMERPHighErrorRate
+    expr: sum(rate(sm_erp_http_requests_total{status=~"5.."}[5m])) / sum(rate(sm_erp_http_requests_total[5m]))
+      > 0.05
+    for: 5m
+    labels:
+      severity: Warning
+      service: sm-erp
+    annotations:
+      summary: SM ERP 5xx 错误率超过 5%
+      description: SM ERP（sm-erp）过去 5 分钟 5xx 响应占比 超过 5%（当前值 {{ $value | humanizePercentage
+        }}），请检查上游依赖与错误日志。
+  - alert: SMERPHighLatency
+    expr: (sum(rate(sm_erp_latency_ms_total[5m])) / sum(rate(sm_erp_requests_total[5m])))
+      > 1000
+    for: 5m
+    labels:
+      severity: Warning
+      service: sm-erp
+    annotations:
+      summary: SM ERP 请求平均延迟超过 1s
+      description: SM ERP（sm-erp）过去 5 分钟请求平均延迟 （rate(latency_ms_total)/rate(requests_total)）超过
+        1000ms（当前 {{ $value | humanize }} ms）。注：该服务未暴露延迟直方图，此处用平均延迟近似 p99 高延迟告警。
+  - alert: SMERPHighMemoryUsage
+    expr: sum(container_memory_working_set_bytes{pod=~"sm-erp-.*", container!="",
+      container!="POD"}) by (pod) > 536870912
+    for: 5m
+    labels:
+      severity: Warning
+      service: sm-erp
+    annotations:
+      summary: SM ERP 进程内存超过 512MB
+      description: '{{ $labels.pod }} 容器工作集内存超过 512MiB（当前 {{ $value | humanize1024
+        }B），SM ERP（sm-erp）存在内存泄漏或 OOM 风险，请排查。'

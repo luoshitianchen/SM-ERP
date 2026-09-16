@@ -1,0 +1,329 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "sm_erp_obs",
+    "title": "SM ERP 监控面板",
+    "tags": [
+      "sm-platform",
+      "sm-erp",
+      "observability"
+    ],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "namespace",
+          "type": "query",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "query": "label_values(kube_pod_info, namespace)",
+          "refresh": 1,
+          "multi": true,
+          "includeAll": true
+        },
+        {
+          "name": "pod",
+          "type": "query",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "query": "label_values(up{job=\"sm-erp\", namespace=\"$namespace\"}, pod)",
+          "refresh": 1,
+          "multi": true,
+          "includeAll": true
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "type": "timeseries",
+        "title": "QPS 趋势 (req/s)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(rate(sm_erp_requests_total{namespace=\"$namespace\", pod=~\"$pod\"}[5m]))",
+            "legendFormat": "总 QPS"
+          },
+          {
+            "refId": "B",
+            "expr": "sum(rate(sm_erp_http_requests_total{namespace=\"$namespace\", pod=~\"$pod\", status=~\"2..\"}[5m]))",
+            "legendFormat": "2xx"
+          },
+          {
+            "refId": "C",
+            "expr": "sum(rate(sm_erp_http_requests_total{namespace=\"$namespace\", pod=~\"$pod\", status=~\"4..\"}[5m]))",
+            "legendFormat": "4xx"
+          },
+          {
+            "refId": "D",
+            "expr": "sum(rate(sm_erp_http_requests_total{namespace=\"$namespace\", pod=~\"$pod\", status=~\"5..\"}[5m]))",
+            "legendFormat": "5xx"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps"
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "type": "stat",
+        "title": "错误率 (5xx 占比)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(rate(sm_erp_http_requests_total{namespace=\"$namespace\", pod=~\"$pod\", status=~\"5..\"}[5m])) / sum(rate(sm_erp_http_requests_total{namespace=\"$namespace\", pod=~\"$pod\"}[5m]))",
+            "legendFormat": "错误率"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.02
+                },
+                {
+                  "color": "red",
+                  "value": 0.05
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ]
+          },
+          "orientation": "horizontal"
+        }
+      },
+      {
+        "id": 3,
+        "type": "timeseries",
+        "title": "请求延迟 (avg, ms)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "(sum(rate(sm_erp_latency_ms_total{namespace=\"$namespace\", pod=~\"$pod\"}[5m])) / sum(rate(sm_erp_requests_total{namespace=\"$namespace\", pod=~\"$pod\"}[5m])))",
+            "legendFormat": "avg 延迟(ms)"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        },
+        "description": "该服务未暴露延迟直方图，仅展示平均延迟（latency_ms_total / requests_total），无法拆分 p50/p95/p99。"
+      },
+      {
+        "id": 4,
+        "type": "statusgrid",
+        "title": "Pod 状态 (up)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "up{job=\"sm-erp\", namespace=\"$namespace\", pod=~\"$pod\"}",
+            "legendFormat": "{{pod}}"
+          }
+        ],
+        "options": {
+          "legend": {
+            "show": true
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {
+                    "text": "Down",
+                    "color": "red"
+                  },
+                  "1": {
+                    "text": "Up",
+                    "color": "green"
+                  }
+                }
+              }
+            ],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 5,
+        "type": "timeseries",
+        "title": "CPU 使用率 (cores)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", pod=~\"$pod\", container!=\"\", container!=\"POD\"}[5m])) by (pod)",
+            "legendFormat": "{{pod}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "cores"
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "type": "timeseries",
+        "title": "内存使用 (working set)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(container_memory_working_set_bytes{namespace=\"$namespace\", pod=~\"$pod\", container!=\"\", container!=\"POD\"}) by (pod)",
+            "legendFormat": "{{pod}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes",
+            "max": 536870912
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        }
+      }
+    ]
+  },
+  "overwrite": true
+}
