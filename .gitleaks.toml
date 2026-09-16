@@ -1,0 +1,14 @@
+# Gitleaks 配置：允许测试文件中的已知测试凭据
+[allowlist]
+  description = "允许测试文件和已知测试模式"
+  paths = [
+    '''tests/''',
+    '''test_''',
+    '''conftest.py''',
+  ]
+  regexes = [
+    '''test-internal-key-\\d+''',
+    '''test-jwt-secret-for-testing-only-\\d+''',
+    '''TestPass\\d+''',
+    '''ChangeMe\\d+!''',
+  ]
