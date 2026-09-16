@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fastapi import HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
@@ -70,6 +70,12 @@ async def _ensure_seed(session: AsyncSession) -> None:
         ))
 
 
+def _validate_hire_date(hire_date: date | None) -> None:
+    """业务规则：入职日期不得晚于当前日期。"""
+    if hire_date is not None and hire_date > date.today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "入职日期不能晚于今天")
+
+
 class EmployeeService:
     @staticmethod
     async def list_employees(session: AsyncSession) -> list[dict]:
@@ -79,6 +85,7 @@ class EmployeeService:
             {
                 "id": e.id, "username": e.username, "name": e.name,
                 "department": e.department, "role": e.role, "active": e.active,
+                "hire_date": e.hire_date.isoformat() if e.hire_date else None,
                 "created_at": e.created_at.isoformat() if e.created_at else "",
             }
             for e in rows
@@ -89,12 +96,14 @@ class EmployeeService:
         if not internal_write_allowed(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "内部写入令牌无效")
         await _ensure_seed(session)
+        _validate_hire_date(payload.hire_date)
         if not await get_department(session, payload.department):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "部门不存在")
         emp = Employee(
             id=str(uuid.uuid4()), username=payload.username,
             password_hash=_hash_password(payload.password), name=payload.name,
             department=payload.department, role=payload.role, active=True,
+            hire_date=payload.hire_date,
         )
         try:
             emp = await repo_create_emp(session, emp)
@@ -110,6 +119,7 @@ class EmployeeService:
         emp = await get_employee(session, employee_id)
         if not emp:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "员工不存在")
+        # 状态流转：仅允许在 active / inactive 之间切换
         emp.active = active
         await session.commit()
         await session.refresh(emp)
@@ -127,8 +137,8 @@ class DepartmentService:
         for dept in rows:
             count = await employee_count_by_department(session, dept.id)
             result.append({
-                "id": dept.id, "name": dept.name,
-                "manager_id": dept.manager_id, "employee_count": count,
+                "id": dept.id, "name": dept.name, "manager_id": dept.manager_id,
+                "parent_id": dept.parent_id, "employee_count": count,
             })
         return result
 
@@ -137,13 +147,19 @@ class DepartmentService:
         if not internal_write_allowed(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "内部写入令牌无效")
         await _ensure_seed(session)
-        dept = Department(id=payload.id, name=payload.name)
+        # 业务规则：指定父部门时父部门必须存在，且不能自引用
+        if payload.parent_id:
+            if payload.parent_id == payload.id:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "父部门不能是自身")
+            if not await get_department(session, payload.parent_id):
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "父部门不存在")
+        dept = Department(id=payload.id, name=payload.name, parent_id=payload.parent_id)
         try:
             dept = await repo_create_dept(session, dept)
         except IntegrityError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "部门 ID 或名称已存在") from exc
         await record_audit(session, "department.created", "internal", f"department_id={dept.id}", request)
-        return {"id": dept.id, "name": dept.name, "message": "部门已创建"}
+        return {"id": dept.id, "name": dept.name, "parent_id": dept.parent_id, "message": "部门已创建"}
 
 
 class DashboardService:

@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging import setup_logging
 from app.core.middleware import SecurityMiddleware
-from app.routers import crypto, employees, health, items, meta, metrics
+from app.routers import crypto, employees, health, inventory, items, meta, metrics, purchases
 
 setup_logging()
 
@@ -43,6 +43,8 @@ app.include_router(crypto.router)
 app.include_router(items.router)
 app.include_router(metrics.router)
 app.include_router(employees.router)
+app.include_router(purchases.router)
+app.include_router(inventory.router)
 
 
 

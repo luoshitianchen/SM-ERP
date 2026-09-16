@@ -1,9 +1,9 @@
 """ERP 身份域模型：部门与员工（v2.5.0 业务逻辑迁移至分层架构）。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -16,6 +16,8 @@ class Department(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     manager_id: Mapped[str] = mapped_column(String(64), default="")
+    # 部门层级：父部门 ID，空串表示顶级部门
+    parent_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -31,4 +33,6 @@ class Employee(Base):
     )
     role: Mapped[str] = mapped_column(String(16), default="employee")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 入职日期：业务规则校验不得晚于当前日期
+    hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
