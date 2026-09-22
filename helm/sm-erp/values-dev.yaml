@@ -1,0 +1,24 @@
+# dev 环境覆盖 - SM-ERP
+replicaCount: 1
+image:
+  tag: dev
+config:
+  SM_ENV: development
+  SM_LOG_LEVEL: debug
+ingress:
+  hosts:
+    - host: sm-erp.dev.sm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+hpa:
+  minReplicas: 1
+  maxReplicas: 3
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

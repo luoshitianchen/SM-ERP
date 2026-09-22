@@ -1,0 +1,42 @@
+# SM-ERP ArgoCD Application - 生产环境自动同步
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sm-erp
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: sm-platform
+    app.kubernetes.io/environment: prod
+spec:
+  project: sm-prod
+  source:
+    repoURL: https://github.com/luoshitianchen/SM-ERP.git
+    targetRevision: main
+    path: helm/sm-erp
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sm-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

@@ -1,0 +1,28 @@
+# prod 环境覆盖 - SM-ERP
+replicaCount: 3
+image:
+  tag: ""
+  pullPolicy: IfNotPresent
+config:
+  SM_ENV: production
+  SM_LOG_LEVEL: warn
+ingress:
+  hosts:
+    - host: sm-erp.sm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: sm-tls
+      hosts:
+        - sm-erp.sm.example.com
+hpa:
+  minReplicas: 3
+  maxReplicas: 10
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi

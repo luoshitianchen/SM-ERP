@@ -1,0 +1,13 @@
+# SM-ERP Helm Chart 定义
+apiVersion: v2
+name: sm-erp
+description: SM-ERP 微服务 Helm Chart - 企业级部署资产
+type: application
+version: 1.0.0
+appVersion: "2.1.0"
+keywords:
+  - sm-microservices
+  - enterprise
+  - sm-erp
+maintainers:
+  - name: sm-platform-team
