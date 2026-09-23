@@ -105,7 +105,12 @@ def b64url_decode(data: str) -> bytes:
 
 
 def _jwt_secret() -> str:
-    """获取 JWT 签名密钥：优先环境变量，否则从持久化设置读取/生成。"""
+    """获取 JWT 签名密钥：优先环境变量，否则从持久化设置读取/生成。
+
+    修复：原实现 run_coroutine_threadsafe(...).result() 在事件循环线程内被同步
+    调用时形成跨线程死锁导致超时 500；现改为独立线程运行独立事件循环，避免等待
+    同一个事件循环。生产环境建议始终通过 SM_JWT_SECRET 环境变量注入密钥。
+    """
     if settings.JWT_SECRET:
         return settings.JWT_SECRET
     from app.core.database import async_session
@@ -119,13 +124,22 @@ def _jwt_secret() -> str:
                 await set_setting(session, "jwt_secret", existing)
             return existing
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return asyncio.run_coroutine_threadsafe(_ensure(), loop).result(timeout=5)
-        return loop.run_until_complete(_ensure())
-    except RuntimeError:
-        return asyncio.run(_ensure())
+    holder: dict = {}
+
+    def _run() -> None:
+        try:
+            holder["value"] = asyncio.run(_ensure())
+        except BaseException as exc:  # noqa: BLE001 - 跨线程传递异常
+            holder["error"] = exc
+
+    worker = threading.Thread(target=_run, name="jwt-secret-loader", daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    if "error" in holder:
+        raise holder["error"]
+    if "value" in holder:
+        return holder["value"]
+    raise TimeoutError("JWT 密钥初始化超时（请配置 SM_JWT_SECRET 环境变量）")
 
 
 
