@@ -68,15 +68,24 @@ def _sm4_key() -> bytes:
             if not existing:
                 existing = secrets.token_hex(16)
                 await set_setting(session, "sm4_key_hex", existing)
-            return existing
+            return bytes.fromhex(existing)
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return asyncio.run_coroutine_threadsafe(_ensure(), loop).result(timeout=5)
-        return loop.run_until_complete(_ensure())
-    except RuntimeError:
-        return asyncio.run(_ensure())
+    holder: dict = {}
+
+    def _run() -> None:
+        try:
+            holder["value"] = asyncio.run(_ensure())
+        except BaseException as exc:  # noqa: BLE001 - 跨线程传递异常
+            holder["error"] = exc
+
+    worker = threading.Thread(target=_run, name="sm4-key-loader", daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    if "error" in holder:
+        raise holder["error"]
+    if "value" in holder:
+        return holder["value"]
+    raise TimeoutError("SM4 密钥初始化超时（请配置 SM_SM4_KEY_HEX 环境变量）")
 
 
 def sm4_crypt(value: bytes, encrypt: bool) -> bytes:
