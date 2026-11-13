@@ -14,8 +14,8 @@
     {
       "type": "library",
       "name": "fastapi",
-      "version": "0.159.1",
-      "purl": "pkg:pypi/fastapi@0.159.1"
+      "version": "0.162.5",
+      "purl": "pkg:pypi/fastapi@0.162.5"
     },
     {
       "type": "library",
@@ -26,8 +26,8 @@
     {
       "type": "library",
       "name": "pydantic",
-      "version": "2.14.1",
-      "purl": "pkg:pypi/pydantic@2.14.1"
+      "version": "2.14.3",
+      "purl": "pkg:pypi/pydantic@2.14.3"
     },
     {
       "type": "library",
